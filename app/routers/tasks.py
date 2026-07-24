@@ -5,15 +5,26 @@ Read-only access to task information for a deployment. Tasks are created by the
 deployment flow itself; this router exposes status and details so the frontend
 can render progress.
 
-Every endpoint enforces deployment-level access via `ensure_deployment_access`
+Every endpoint enforces owner-view access via ``ensure_view_deployment_owner``
 to prevent IDOR — without it, any authenticated user could read foreign task
-logs (which include Terraform outputs, IPs, etc.).
+logs (which include Terraform outputs, IPs, etc.). That gate is strictly
+narrower than plain deployment access: it admits only the owner, admins, and
+course-teachers of the owner's course, so a separate ``ensure_deployment_access``
+check would be redundant.
 
 Tasks contain operational data — terraform stdout/stderr, packer build chatter,
-worker stack traces — that members shouldn't see. Endpoints additionally
-enforce ``ensure_deployment_owner_view`` so only the deployment creator,
-teachers, and admins can fetch them. Members get a 403 here even though they
-can read the deployment metadata via ``GET /deployments/{id}``.
+worker stack traces, and the terraform ``outputs`` that carry the deployment's
+access credentials — that members shouldn't see. Endpoints therefore enforce
+``ensure_view_deployment_owner`` (the capabilities-based owner-view gate) so only
+the deployment creator, admins, and course-teachers of the owner's course can
+fetch them. Members get a 403 here even though they can read the deployment
+metadata via ``GET /deployments/{id}``.
+
+This is the same course-scoped gate the deployment router uses for the
+``/resources``, ``/stream`` and ``/files`` endpoints. Using it here keeps the
+credential-bearing task payload from leaking to teachers outside the owner's
+course — the legacy ``permissions.ensure_deployment_owner_view`` granted every
+staff member owner-view regardless of course assignment.
 """
 
 from uuid import UUID
@@ -26,8 +37,8 @@ from app.crud import tasks as crud_tasks
 from app.database import get_db
 from app.models import User
 from app.schemas import TaskResponse
+from app.utils.capabilities import ensure_view_deployment_owner
 from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.permissions import ensure_deployment_access, ensure_deployment_owner_view
 
 router = APIRouter()
 
@@ -45,8 +56,7 @@ def get_deployment_tasks(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    ensure_deployment_access(deployment, current_user, db)
-    ensure_deployment_owner_view(deployment, current_user)
+    ensure_view_deployment_owner(current_user, deployment, db)
     return crud_tasks.get_tasks(db, deployment_id=deployment_id)
 
 
@@ -69,6 +79,5 @@ def get_task(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment for task not found",
         )
-    ensure_deployment_access(deployment, current_user, db)
-    ensure_deployment_owner_view(deployment, current_user)
+    ensure_view_deployment_owner(current_user, deployment, db)
     return task
