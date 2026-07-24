@@ -301,6 +301,26 @@ class DeploymentOutputs(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+# Per-member self-access response
+class MyAccessResponse(BaseModel):
+    """A single team member's own access credentials.
+
+    Returned by ``GET /deployments/{id}/my-access`` so a member (student)
+    can see their OWN credentials without the owner-view that gates the
+    full outputs. Only the caller's own account is ever present.
+
+    Both maps mirror the raw terraform ``user_accounts`` / ``team_vms``
+    output shape (one key each: the member's account and their team's VM)
+    so the frontend's existing account-matching pipeline consumes this
+    unchanged. Empty maps mean "no credentials yet" (no successful deploy,
+    or the app issued no per-user account) — a valid 200, not an error.
+    """
+    user_accounts: dict[str, dict[str, Any]] = {}
+    team_vms: dict[str, dict[str, Any]] = {}
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # Full deployment detail response
 class DeploymentDetail(DeploymentWithRelations):
     """Full deployment details with teams, task info, and outputs"""
