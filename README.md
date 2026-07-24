@@ -52,9 +52,7 @@ Swagger-UI mit allen Endpoints: http://localhost:8000/docs (nach `make dev-up`).
 
 ## Code-Struktur
 
-Der Code liegt in `app/` und folgt einem Schichtenmodell: ein Request läuft
-`routers/` (HTTP + Auth) → `crud/` (DB-Zugriff) → `models.py` (ORM), fachliche
-Logik steckt in `services/`.
+Der Code liegt in `app/` und folgt einem Schichtenmodell: ein Request läuft `routers/` (HTTP + Auth) → `crud/` (DB-Zugriff) → `models.py` (ORM), fachliche Logik steckt in `services/`.
 
 ```
 app/
@@ -87,10 +85,7 @@ app/
 | `openstack_credentials` | `/me/openstack-credentials` | OpenStack-Zugangsdaten pro User |
 | `openstack_resources` | `/me/openstack/resources` | Read-API für Networks/Flavors/Images (Wizard-Dropdowns) |
 
-**crud/** — je ein File pro Ressource (`users`, `apps`, `courses`, `teams`,
-`tasks`, `app_version_approvals`, `openstack_credentials`), das reine
-DB-Operationen für das gleichnamige Modell kapselt — keine HTTP- oder
-Business-Logik. Zwei fallen aus dem Muster:
+**crud/** — je ein File pro Ressource (`users`, `apps`, `courses`, `teams`, `tasks`, `app_version_approvals`, `openstack_credentials`), das reine DB-Operationen für das gleichnamige Modell kapselt — keine HTTP- oder Business-Logik. Zwei fallen aus dem Muster:
 
 - `deployments` — mit Abstand am umfangreichsten, da Deployments die Kern-Ressource sind (Status-Übergänge, Task-Verknüpfung, Redeploy)
 - `locks` — keine Ressource, sondern Per-User-Serialisierung über Postgres Advisory Locks (verhindert parallele Deployments desselben Users)
@@ -113,9 +108,7 @@ Business-Logik. Zwei fallen aus dem Muster:
 | `clouds_yaml_parser` | Parst rohes `clouds.yaml` in ein Credential-Schema |
 | `tf_state_parser` | Liest den in `Task.tf_state` persistierten Terraform-State |
 
-**utils/** — `keycloak_auth` (Token-Validierung), `permissions` + `capabilities`
-(rollenbasierte `can_*`/`ensure_*`-Checks), `crypto` (Fernet-Verschlüsselung
-at-rest, Key geteilt mit dem Worker), `app_image` (Data-URL ↔ Bytes), `time`.
+**utils/** — `keycloak_auth` (Token-Validierung), `permissions` + `capabilities` (rollenbasierte `can_*`/`ensure_*`-Checks), `crypto` (Fernet-Verschlüsselung at-rest, Key geteilt mit dem Worker), `app_image` (Data-URL ↔ Bytes), `time`.
 
 ## Mehr
 
