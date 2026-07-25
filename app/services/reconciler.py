@@ -1,29 +1,20 @@
 """Background reconciler for stuck Celery tasks.
 
-The Celery event listener (`celery_event_listener.py`) is the primary
-path for syncing task state into the DB. Events can be lost — the
-backend might be restarting when one fires, RabbitMQ may drop the
-message under load, or the worker may die mid-handler before the
-event is published. Without a fallback, those tasks would sit in
-PENDING/RUNNING forever.
+The Celery event listener is the primary path for syncing task state
+into the DB, but events can be lost (backend restart, dropped message,
+worker death mid-handler), leaving tasks stuck in PENDING/RUNNING.
 
 This reconciler runs as a coroutine inside the FastAPI lifespan. Every
 30 seconds it:
 
 1. Selects all tasks in PENDING or RUNNING.
-2. For each row, asks Celery for the AsyncResult and reconciles the DB
-   row against what Celery thinks happened.
-3. Specifically catches dispatch failures: tasks with `celeryTaskId
-   IS NULL` older than the grace window are flipped to FAILED. The
-   deployments router commits the row before `send_task` returns; if
-   the process crashed between the commit and the cleanup branch,
-   the row would be stuck without this safety net.
+2. Reconciles each against its Celery AsyncResult.
+3. Flips tasks with ``celeryTaskId IS NULL`` older than the grace
+   window to FAILED (dispatch never completed).
 
-Multi-instance safety: a Postgres session-scoped advisory lock keyed
-on a constant gates each pass. Two FastAPI processes can run the
-lifespan; only one will win the lock per pass and run the reconcile
-body. The loser silently skips and tries again next tick. The pass
-itself is idempotent regardless.
+Multi-instance safety: a Postgres session-scoped advisory lock gates
+each pass, so only one FastAPI process runs the reconcile body per
+tick. The pass is idempotent regardless.
 """
 from __future__ import annotations
 
@@ -46,23 +37,18 @@ from app.utils.time import utcnow
 logger = logging.getLogger(__name__)
 
 
-# Constant key for the advisory lock. Picked at random; nothing else
-# in the codebase uses pg_try_advisory_lock with this key, and the
-# per-user lock helper hashes a UUID via hashtext() into a different
-# range.
+# Constant key for the advisory lock. Distinct from the per-user lock
+# helper's hashtext()-derived range.
 RECONCILER_ADVISORY_LOCK_KEY = 4242424242
 
 RECONCILE_INTERVAL_SECONDS = 30
 
-# Grace window for a celery_id-NULL task. The deployments router
-# commits the task row first and then calls send_task; if that crashes
-# before the row can be flipped to FAILED in a fresh TX, the row is
-# orphaned. Anything older than this is fair game for the reconciler.
+# Grace window for a celery_id-NULL task (dispatch committed the row
+# but send_task never stamped an id). Older than this → fair game.
 DISPATCH_GRACE_SECONDS = 60
 
-# Grace window for a Celery PENDING state with a known celery_id.
-# Means the message exists in RabbitMQ but no worker has picked it up.
-# After an hour we treat it as lost (broker restart, queue purge).
+# Grace window for a Celery PENDING state with a known celery_id (in
+# RabbitMQ but no worker picked it up). Older → treated as lost.
 CELERY_PENDING_GRACE_SECONDS = 3600
 
 
@@ -121,10 +107,8 @@ def _try_acquire_lock(db: Session) -> bool:
         text("SELECT pg_try_advisory_lock(:k)"),
         {"k": RECONCILER_ADVISORY_LOCK_KEY},
     ).scalar()
-    # The first SELECT opens an implicit TX; commit it so the row read
-    # doesn't tie up the connection and so subsequent commits don't
-    # accidentally release a transaction-scoped lock (this is session
-    # scoped — pg_advisory_lock — but commit anyway for cleanliness).
+    # The first SELECT opens an implicit TX; commit it so the read
+    # doesn't tie up the connection. (Lock is session-scoped.)
     db.commit()
     return bool(row)
 
@@ -141,13 +125,9 @@ def _reconcile_task(db: Session, task: Task) -> None:
     now = utcnow()
 
     # Per-deployment advisory lock — serialises against the request
-    # handlers (POST /pause, /resume, DELETE, /resend-access) so the
-    # reconciler's "stuck task → FAILED" decision can't race a
-    # request handler's status-read. Held until the first
-    # ``update_task`` commits inside this body (xact-scoped); by that
-    # point the reconciler's mutation is persisted and any concurrent
-    # request handler that subsequently grabs the lock will see the
-    # latest task state.
+    # handlers so the reconciler's "stuck task → FAILED" decision can't
+    # race a handler's status read. Xact-scoped; released on the first
+    # ``update_task`` commit below.
     crud_locks.acquire_deployment_xact_lock(db, task.deploymentId)
 
     if task.celeryTaskId is None:

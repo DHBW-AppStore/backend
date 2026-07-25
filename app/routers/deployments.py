@@ -72,10 +72,10 @@ def _list_course_scope_deployments(
 ) -> list:
     """Resolve the ``?scope=course`` deployment listing for staff callers.
 
-    Phase 3 course-scope: list every deployment whose owner sits in one
-    of the requestor's taught courses. Admins use the same code path for
-    symmetry — usually their set is empty. Returns the raw ``Deployment``
-    rows; the caller runs the shared enrichment loop over the result.
+    Lists every deployment whose owner sits in one of the requestor's
+    taught courses. Admins use the same code path for symmetry — usually
+    their set is empty. Returns the raw ``Deployment`` rows; the caller
+    runs the shared enrichment loop over the result.
     """
     my_courses = get_my_course_teacher_ids(current_user, db)
     if current_user.role == UserRole.ADMIN:
@@ -112,10 +112,7 @@ def _list_course_scope_deployments(
 
     if current_user.role == UserRole.ADMIN and not owner_ids:
         # Admin path with empty course set + no student filter →
-        # mirror the legacy behavior and show the admin's own
-        # owned set instead of an empty page, so the route stays
-        # backwards-compatible for admins who haven't picked up
-        # the scope= query param yet.
+        # show the admin's own owned set instead of an empty page.
         if student is None:
             return crud_deployments.get_deployments(
                 db,
@@ -182,8 +179,8 @@ def list_deployments(
         index.
       * **Teachers** (``?scope=course``): every non-deleted deployment
         whose owner sits in a course they teach (course-teacher
-        inspect right, Phase 3). Optional ``?student=<userId>``
-        narrows the listing to one course-member's deployments,
+        inspect right). Optional ``?student=<userId>`` narrows the
+        listing to one course-member's deployments,
         which is what the student-profile page uses to render the
         deployments list of a single student under the teacher's care.
       * **Students** (and any non-staff role): deployments they own
@@ -230,8 +227,7 @@ def list_deployments(
     # Enrich with status and created_at from tasks. The summary is
     # bulk-fetched in two queries (latest + first task per deployment via
     # window functions) so the list endpoint stays at a constant query
-    # count regardless of page size — the per-row ``get_latest_task`` /
-    # ``get_first_task`` fan-out used to put us at 1 + 2N queries.
+    # count regardless of page size.
     task_summary = crud_deployments.bulk_get_task_summary(
         db, [d.deploymentId for d in deployments]
     )
@@ -319,9 +315,9 @@ def get_deployment(
     # Get teams with members. The owner view sees every team and
     # every member. The member view only sees their own team(s) so
     # they can't browse who else has access to the deployment.
-    # Phase 3: ``can_view_deployment_owner`` widens "owner view" to
-    # course-teachers of the deployment-owner's course, so they get
-    # the full roster + logs + outputs alongside owners and admins.
+    # ``can_view_deployment_owner`` widens "owner view" to course-teachers
+    # of the deployment-owner's course, so they get the full roster + logs
+    # + outputs alongside owners and admins.
     is_owner_view = can_view_deployment_owner(current_user, deployment, db)
     teams_data = crud_deployments.get_deployment_teams_with_members(db, deployment_id)
     if not is_owner_view:
@@ -473,8 +469,8 @@ def _attach_files_to_user_input(
         if var_name in terraform_block:
             # Wizard already routed something into this variable — a
             # collision means the frontend filled both the variables
-            # picker AND the file uploader for the same name. That's
-            # an unrecoverable contract bug; surface it clearly.
+            # picker AND the file uploader for the same name. That's an
+            # unrecoverable contract violation; surface it clearly.
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail={
@@ -495,7 +491,7 @@ def _attach_files_to_user_input(
             # ``DeploymentCreate``) — pull fields off attributes.
             content_b64 = upload.content_b64
 
-            # Extension-Filter check — only when the App-Autor declared
+            # Extension-filter check — only when the app author declared
             # an ``@openstack:file:<scope>:<exts>`` filter. We compare
             # the filename suffix (after the last dot, lowercased) to
             # the allowed list. Missing dot or unknown suffix → 422.
@@ -907,16 +903,16 @@ def create_deployment(
             detail={"reason": "app_not_found_or_deleted"},
         )
 
-    # Bug #7 fix — gate the create on the same visibility rule the
-    # list/detail endpoints use. A student cannot deploy a private
-    # app they don't own, and a non-owner cannot deploy an app
-    # without an approved version. The owner / admin path stays open.
+    # Gate the create on the same visibility rule the list/detail
+    # endpoints use. A student cannot deploy a private app they don't
+    # own, and a non-owner cannot deploy an app without an approved
+    # version. The owner / admin path stays open.
     # ``ensure_view_app`` raises 403 with the structured payload, so
     # the frontend receives the same shape it sees on the detail
     # endpoint when visibility is denied.
     ensure_view_app(current_user, target_app, db=db)
 
-    # Load the App-Autor's variable declarations so we can enforce
+    # Load the app author's variable declarations so we can enforce
     # per-variable contracts (``varScope``, ``fileExtensions``) below.
     # We only do this when the request actually carries variables /
     # files — for a no-input deploy the round-trip into Git would be
@@ -940,7 +936,7 @@ def create_deployment(
     # uniform dict. The helper validates base64 / size / per-file and
     # per-deployment caps; any failure short-circuits with a 4xx and
     # the row never enters the DB. When variable definitions are
-    # available, the helper also enforces the App-Autor's declared
+    # available, the helper also enforces the app author's declared
     # ``fileExtensions`` filter on each upload name.
     deployment.userInputVar = _attach_files_to_user_input(
         deployment.userInputVar, deployment.files, variable_definitions or None,
@@ -1093,7 +1089,7 @@ def delete_deployment(
             detail="Deployment not found",
         )
 
-    # Phase 3: destructive operation — uses the operate gate, which is
+    # Destructive operation — uses the operate gate, which is
     # owner-or-admin only. Course-teachers explicitly do NOT get
     # delete/destroy rights on deployments in their courses; they only
     # get inspect (logs, infra).
@@ -1442,9 +1438,9 @@ def list_deployment_resources(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    # Phase 3: inspect-only view — owner, admin, or a course-teacher
-    # of the deployment-owner's course. Course-teachers explicitly do
-    # NOT have operate rights; this endpoint is read-only.
+    # Inspect-only view — owner, admin, or a course-teacher of the
+    # deployment-owner's course. Course-teachers explicitly do NOT have
+    # operate rights; this endpoint is read-only.
     ensure_view_deployment_owner(current_user, deployment, db)
 
     state_json = _latest_tf_state_for(deployment_id, db)
@@ -1488,8 +1484,8 @@ def get_deployment_resource_detail(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    # Phase 3: inspect-only view — course-teachers may read the
-    # per-resource detail; the per-VM redeploy below is operate-gated.
+    # Inspect-only view — course-teachers may read the per-resource
+    # detail; the per-VM redeploy below is operate-gated.
     ensure_view_deployment_owner(current_user, deployment, db)
 
     if not _TF_ADDRESS_RE.match(address):
@@ -1543,7 +1539,7 @@ def redeploy_deployment_resource(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    # Phase 3: per-VM redeploy is a mutating operation — operate gate
+    # Per-VM redeploy is a mutating operation — operate gate
     # (owner-or-admin). Course-teachers may inspect the resource via
     # the GET endpoints above but not bounce it.
     ensure_operate_deployment(current_user, deployment, db)
@@ -1733,13 +1729,12 @@ def download_deployment_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Deployment not found",
         )
-    # Phase 3 — inspect-only view, gated through capabilities so
-    # course-teachers can download the same wizard-uploaded files
-    # they can already see referenced in the inspect view (logs /
-    # detail). Owners + admins keep their pre-existing access. The
-    # list/detail strip-pass already hid the base64 payload from
-    # plain members, so this endpoint stays restricted to the
-    # owner-view set.
+    # Inspect-only view, gated through capabilities so course-teachers
+    # can download the same wizard-uploaded files they can already see
+    # referenced in the inspect view (logs / detail). Owners + admins
+    # keep their access. The list/detail strip-pass already hid the
+    # base64 payload from plain members, so this endpoint stays
+    # restricted to the owner-view set.
     ensure_view_deployment_owner(current_user, deployment, db)
 
     if not deployment.userInputVar:
@@ -2013,12 +2008,11 @@ async def stream_deployment_events(
     deployment = crud_deployments.get_deployment(db, deployment_id)
     if not deployment:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found")
-    # Phase 3 — inspect-only view via capabilities. The live stream
-    # surfaces task-log lines (raw worker stdout incl. terraform
-    # output, packer build chatter, etc.); course-teachers of the
-    # deployment-owner's course are now in the inspect set, owners
-    # and admins keep their pre-existing access, and plain members
-    # still see metadata only.
+    # Inspect-only view via capabilities. The live stream surfaces
+    # task-log lines (raw worker stdout incl. terraform output, packer
+    # build chatter, etc.); course-teachers of the deployment-owner's
+    # course are in the inspect set, owners and admins keep their access,
+    # and plain members still see metadata only.
     ensure_view_deployment_owner(current_user, deployment, db)
 
     # Snapshot the latest task once before subscribing so the client

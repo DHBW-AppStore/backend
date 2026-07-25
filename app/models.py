@@ -41,10 +41,9 @@ class TaskType(str, enum.Enum):
     DESTROY = "destroy"
     PAUSE = "pause"
     RESUME = "resume"
-    # Single-resource redeploy: ``terraform apply -replace=<addr> -target=<addr>``
-    # for ONE Compute-Instance, without touching the other team VMs of the
-    # same deployment. Backend-validates that the targeted address is a
-    # known compute-instance in the cached TF state.
+    # Single-resource redeploy of ONE Compute-Instance via
+    # ``terraform apply -replace=<addr> -target=<addr>``, without
+    # touching the other team VMs of the same deployment.
     REDEPLOY = "redeploy"
 
 
@@ -72,11 +71,9 @@ class Course(Base):
 
     # Relationships
     users = relationship("User", back_populates="course")
-    # Many-to-many relationship to the User table via the
-    # ``course_teachers`` join table. A given course can have several
-    # teachers, and a given teacher can own several courses. This is
-    # the data backing the ``is_course_teacher`` capability check —
-    # see :mod:`app.utils.capabilities`.
+    # Many-to-many to User via the ``course_teachers`` join table:
+    # a course can have several teachers and a teacher several courses.
+    # Backs the ``is_course_teacher`` capability check.
     course_teachers = relationship(
         "CourseTeacher",
         back_populates="course",
@@ -138,10 +135,8 @@ class App(Base):
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
     created_at = Column(DateTime, default=utcnow)
     # Soft-delete marker. When set, the app is hidden from default
-    # queries (apps list, deploy wizard) but the row stays so existing
-    # deployments referencing this app keep their FK valid and the
-    # audit trail survives. The router refuses to soft-delete an app
-    # while it has live deployments to avoid orphan resources.
+    # queries but the row stays so existing deployments keep their FK
+    # valid. Soft-delete is refused while the app has live deployments.
     deleted_at = Column(DateTime, nullable=True)
 
     # Relationships
@@ -167,12 +162,10 @@ class Deployment(Base):
     userInputVar = Column(Text, nullable=True)  # could also be JSON
     userId = Column(UUID(as_uuid=True), ForeignKey("users.userId"), nullable=False, index=True)
     appId = Column(UUID(as_uuid=True), ForeignKey("apps.appId"), nullable=False, index=True)
-    # Soft-delete marker. Set to ``utcnow()`` to hide the deployment
-    # from default queries while keeping the row for audit/restore.
-    # See lifecycle.py — DELETE is only allowed in terminal states, so
-    # by the time this is set the OpenStack resources are already gone
-    # (or never existed). The index on (deleted_at IS NULL) keeps the
-    # default list query cheap.
+    # Soft-delete marker. Set to hide the deployment from default
+    # queries while keeping the row for audit/restore. DELETE is only
+    # allowed in terminal states, so OpenStack resources are already
+    # gone by the time this is set.
     deleted_at = Column(DateTime, nullable=True)
 
     # Relationships
@@ -219,11 +212,9 @@ class Task(Base):
     logs = Column(Text, nullable=True)  # JSON or text
     tf_state = Column(Text, nullable=True)  # Terraform state as JSON/text
     outputs = Column(Text, nullable=True)  # Terraform outputs as JSON/text
-    # Live-progress columns. Updated by the celery event listener whenever
-    # the worker emits a `task-progress` event. They are advisory — the
-    # canonical source of "what is happening right now" is the SSE stream;
-    # these columns let users who reload the page see the last known
-    # phase/percent without waiting for the next event.
+    # Live-progress columns, updated by the celery event listener on
+    # each ``task-progress`` event. Advisory only — the SSE stream is
+    # canonical; these let a page reload show the last known phase/pct.
     current_phase = Column(String(50), nullable=True)
     progress_pct = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=utcnow)
@@ -397,15 +388,8 @@ class AppVersionApproval(Base):
 # ----------------------------------------------------------------
 # Many-to-many join between courses and users. A row ``(course_id,
 # user_id)`` declares that ``user`` is one of the teachers responsible
-# for ``course``. Backs the per-course "course-teacher" capability
-# (inspect-only on deployments in the course, edit/delete on the
-# course itself). The composite primary key gives us natural
-# idempotency on insert and dedupes accidental double-adds.
-#
-# Pattern note: this mirrors the UserToTeam shape — a tiny join model
-# with two FKs plus a single composite PK — except both FKs together
-# *are* the PK here (instead of an extra synthetic UUID column),
-# because we never need to address a single membership row by id.
+# for ``course``. Backs the per-course "course-teacher" capability.
+# Both FKs together form the composite primary key.
 class CourseTeacher(Base):
     __tablename__ = "course_teachers"
 

@@ -3,10 +3,6 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # App
-    APP_NAME: str = "Backend API"
-    DEBUG: bool = False
-
     # Database
     DATABASE_URL: str
 
@@ -33,19 +29,15 @@ class Settings(BaseSettings):
     CREDENTIAL_ENCRYPTION_KEY: str
 
     # SMTP (Gmail). Required for the post-deploy notification mails.
-    # Generate an "App password" in Google account settings (the regular
-    # password won't work with 2FA enabled).
+    # Use a Google "App password" (the regular password won't work with
+    # 2FA enabled).
     #
     # SMTP_ENABLED is the explicit kill-switch — set it to False to turn
-    # mail delivery into a no-op even when SMTP_USER/SMTP_PASSWORD are
-    # populated. Two reasons it lives separately from the credentials:
-    # (1) operators routinely keep the Gmail app-password in .env for
-    # later use but want mail off in dev / CI / on demo days, and
-    # (2) the resend-access endpoint needs to distinguish "we chose
-    # not to send" (HTTP 503, configuration intent) from "we tried and
-    # SMTP refused" (HTTP 502, infrastructure problem) — that
-    # distinction is impossible if "off" and "creds missing" share a
-    # state.
+    # mail delivery into a no-op even when credentials are populated. It
+    # lives separately from the credentials so operators can keep the
+    # app-password in .env while disabling mail in dev/CI, and so the
+    # resend-access endpoint can distinguish "we chose not to send"
+    # (HTTP 503) from "SMTP refused" (HTTP 502).
     SMTP_ENABLED: bool = False
     SMTP_HOST: str = "smtp.gmail.com"
     SMTP_PORT: int = 587

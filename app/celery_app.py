@@ -2,7 +2,7 @@ from celery import Celery
 
 from .config import settings
 
-celery_app = Celery("worker", broker=settings.CELERY_BROKER_URL)  # ← KEIN include hier!
+celery_app = Celery("worker", broker=settings.CELERY_BROKER_URL)  # no include here
 
 celery_app.conf.update(
     broker_url=settings.CELERY_BROKER_URL,

@@ -1,10 +1,8 @@
 """Deployment lifecycle gating — single source of truth for which
 actions are allowed in which state.
 
-The previous code spread state checks across the routers (``if status
-== 'success': allow_destroy = True`` etc.), which made it easy to drift
-between frontend and backend rules. This module centralises the matrix
-so the API and the UI can both consult one canonical mapping.
+Centralises the state matrix so the API and the UI consult one
+canonical mapping.
 
 Status values follow ``crud_deployments.get_deployment_status``:
 
@@ -33,25 +31,18 @@ class DeploymentAction(str, Enum):
 
     DESTROY = "destroy"
     DELETE = "delete"
-    # Pause halts compute (``openstack server stop`` for every server
-    # in the deployment's terraform state). Volumes and networks stay,
-    # so resume restores the same instances byte-for-byte. Cheap to
-    # run (~seconds) and cheap to undo, unlike destroy.
+    # Pause halts compute (``openstack server stop`` for every server);
+    # volumes and networks stay so resume restores the same instances.
     PAUSE = "pause"
     # Resume reverses pause. Only valid in the synthetic ``paused``
-    # state to keep the matrix unambiguous: a deployment can't be
-    # resumed if it was never paused.
+    # state so the matrix stays unambiguous.
     RESUME = "resume"
 
 
-# Synthetic statuses where some kind of worker task is currently in
-# flight against the deployment. Every action endpoint must refuse
-# while the deployment is in any of these — otherwise we'd let the
-# user kick off a parallel destroy mid-deploy or a pause mid-resume,
-# which is exactly the partial-unique-index error we're trying to
-# avoid surfacing as a 500. Single Source of Truth so the various
-# routes (DELETE, /pause, /resume, resend-access) and the matrix
-# below stay in sync.
+# Synthetic statuses where a worker task is currently in flight. Every
+# action endpoint must refuse while in any of these to avoid a parallel
+# destroy mid-deploy or pause mid-resume. Single source of truth so the
+# routes and the matrix below stay in sync.
 IN_FLIGHT_STATUSES: frozenset[str] = frozenset({
     "pending",
     "running",
@@ -61,53 +52,38 @@ IN_FLIGHT_STATUSES: frozenset[str] = frozenset({
 })
 
 
-# Status → set of allowed actions. Anything not listed here gets the
-# empty set, which is the safe default: a status we don't recognise
-# should not allow any destructive action.
+# Status → set of allowed actions. Anything not listed gets the empty
+# set (safe default: an unrecognised status allows no destructive action).
 _ALLOWED: dict[str, set[DeploymentAction]] = {
-    # Deployed and running — owner can either tear it down or pause
-    # compute to free RAM/CPU quota for the OpenStack project.
+    # Deployed and running — tear down or pause compute to free quota.
     "success": {DeploymentAction.DESTROY, DeploymentAction.PAUSE},
-    # ``failed`` is the interesting case. The deploy may have created
-    # *some* OpenStack resources before failing (e.g. plan succeeded but
-    # apply broke half-way), so Destroy is offered to reconcile. If the
-    # user knows there's nothing to clean up they can pick Delete
-    # instead — both end at "row hidden from UI", just via different
-    # routes.
+    # A failed deploy may have created some resources, so Destroy is
+    # offered to reconcile; Delete is available when there's nothing to
+    # clean up. Both end at "row hidden from UI".
     "failed": {DeploymentAction.DESTROY, DeploymentAction.DELETE},
-    # No ``destroyed`` entry: a successful destroy auto-soft-deletes
-    # the deployment, so this status only exists transiently between
-    # the worker's task-succeeded event and the listener's
-    # ``soft_delete_deployment`` call (sub-second). The row is hidden
-    # from the default queries before the user could click anything.
+    # No ``destroyed`` entry: a successful destroy auto-soft-deletes the
+    # deployment, so that status only exists transiently (sub-second).
     "cancelled": {DeploymentAction.DELETE},
-    # Paused — the obvious action is Resume, but Destroy stays
-    # available so the user doesn't have to first resume just to tear
-    # the deployment down. Terraform-destroy works fine against
-    # SHUTOFF instances.
+    # Paused — Resume is the obvious action; Destroy stays available so
+    # the user needn't resume first (terraform-destroy works on SHUTOFF).
     "paused": {DeploymentAction.RESUME, DeploymentAction.DESTROY},
-    # Pause failed: the *deployment* is still running (only the
-    # stop-pass tripped). Allow PAUSE retry, RESUME (no-op when
-    # instances are still ACTIVE, but symmetrical and harmless),
-    # and DESTROY for the user who wants to give up.
+    # Pause failed: the deployment is still running. Allow PAUSE retry,
+    # RESUME (harmless), and DESTROY.
     "pause_failed": {
         DeploymentAction.PAUSE,
         DeploymentAction.RESUME,
         DeploymentAction.DESTROY,
     },
-    # Resume failed: the instances are SHUTOFF, the resume pass
-    # broke. Allow RESUME retry, PAUSE (idempotent, the SHUTOFF
-    # state is what pause aims for anyway), and DESTROY.
+    # Resume failed: instances are SHUTOFF. Allow RESUME retry, PAUSE
+    # (idempotent), and DESTROY.
     "resume_failed": {
         DeploymentAction.RESUME,
         DeploymentAction.PAUSE,
         DeploymentAction.DESTROY,
     },
     # pending / running / destroying / pausing / resuming — no action
-    # allowed: an active task is doing something with the resources,
-    # and the partial-unique index on
-    # ``tasks(deploymentId) WHERE status IN ('PENDING','RUNNING')``
-    # in the DB enforces this at insert time too.
+    # allowed; a DB partial-unique index on in-flight tasks enforces
+    # this at insert time too.
 }
 
 # Human-readable explanation for the 409 we throw when an action isn't
@@ -138,10 +114,8 @@ def allowed_actions(db, deployment) -> set[DeploymentAction]:
 def ensure_action_allowed(db, deployment, action: DeploymentAction) -> None:
     """Raise ``HTTPException(409)`` if ``action`` isn't allowed right now.
 
-    Defense in depth on top of the DB-level partial unique index — the
-    index would catch a parallel destroy/deploy collision but its error
-    message is opaque. This check produces a friendly status mismatch
-    message before we even open a transaction.
+    Produces a friendly status-mismatch message on top of the DB-level
+    partial unique index (whose own error is opaque).
     """
     if action in allowed_actions(db, deployment):
         return

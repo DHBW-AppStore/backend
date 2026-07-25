@@ -1,41 +1,26 @@
 """In-process pub/sub bridge between the Celery event listener and the SSE endpoint.
 
-The Celery event listener runs in a daemon thread (started in
-``main.py``'s lifespan) and ingests RabbitMQ events synchronously. Each
-SSE request produces an asyncio coroutine in the FastAPI event loop that
-needs to ``await`` for fresh events scoped to one ``deployment_id``.
+The Celery event listener runs in a daemon thread and ingests RabbitMQ
+events synchronously. Each SSE request produces an asyncio coroutine
+that awaits fresh events scoped to one ``deployment_id``.
 
-This module is the bridge: each SSE coroutine subscribes and gets back an
-``asyncio.Queue``; the listener thread looks up all queues for a given
-``deployment_id`` and pushes the event into each. Because the push
-happens from a non-asyncio thread we use
-``loop.call_soon_threadsafe(queue.put_nowait, …)`` rather than
-``await queue.put(...)``.
+Each SSE coroutine subscribes and gets back an ``asyncio.Queue``; the
+listener thread pushes each event into every queue for that
+``deployment_id`` via ``loop.call_soon_threadsafe`` (the push happens
+from a non-asyncio thread).
 
-Beyond the live fan-out, the pubsub also keeps a small **per-deployment
-ring buffer of recent events** so a client that connects mid-stream
-(opening the detail page while the worker is in the middle of phase 8
-of 11) can be backfilled with what's already happened. Without this the
-SSE endpoint would only show events that occur *after* the connection
-was opened, leaving an empty live-tail until the next worker line lands.
+A small per-deployment ring buffer of recent events lets a client that
+connects mid-stream be backfilled with what already happened.
 
-Trade-offs compared to a Redis pub/sub:
+Notes:
 
-* Subscribers are confined to **this process** — fine for one backend
-  replica, would fan out incorrectly if you scaled to N replicas where
-  the listener thread on replica A holds the only RabbitMQ subscription
-  while the SSE request landed on replica B.
-* The queue is bounded; on overflow the **oldest** entry is discarded
-  and a synthetic ``{"type": "task-overflow", ...}`` is pushed in its
-  place so the frontend can render a "you missed entries" banner rather
-  than silently believing the stream is complete.
-* The recent-buffer is also bounded (per deployment, capped lines).
-  Memory cost is bounded at ``MAX_DEPLOYMENTS × _RECENT_MAX × ~500B``;
-  in practice the buffer is GC'd seconds after the deployment hits a
-  terminal state (no active subscribers, no new events).
-
-Replacing this implementation with a Redis-backed adapter (same public
-methods) is the upgrade path when the deployment grows.
+* Subscribers are confined to this process — fine for one backend
+  replica, would fan out incorrectly across N replicas.
+* Queues are bounded; on overflow the oldest entry is dropped and a
+  synthetic ``{"type": "task-overflow", ...}`` is pushed so the
+  frontend can render a "you missed entries" banner.
+* The recent buffer is bounded per deployment and cleared when the
+  deployment reaches a terminal state.
 """
 
 from __future__ import annotations
@@ -49,16 +34,13 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of buffered events per subscriber. ~200 is generous for
-# a one-screen log tail; if a slow consumer stalls past that, we drop
-# the oldest events and tell the frontend.
+# Maximum number of buffered events per subscriber. If a slow consumer
+# stalls past this, the oldest events are dropped and the frontend is told.
 _QUEUE_MAXSIZE = 200
 
 # Per-deployment recent-events buffer, used to backfill clients that
-# connect mid-stream. Sized for a "what's been happening lately" view,
-# not a full transcript — the final transcript still lives in the task
-# row's ``logs`` column when the worker completes. 500 entries covers
-# multiple minutes of typical worker output without unbounded growth.
+# connect mid-stream. Sized for a "what's been happening lately" view;
+# the full transcript lives in the task row's ``logs`` column.
 _RECENT_MAX = 500
 
 
@@ -73,15 +55,13 @@ class DeploymentPubSub:
 
     def __init__(self) -> None:
         self._subs: dict[str, list[asyncio.Queue[dict[str, Any]]]] = defaultdict(list)
-        # Per-deployment ring buffer of recent events. Snapshot for
-        # mid-stream subscribers. Reset whenever a deployment hits a
-        # terminal lifecycle event (succeeded/failed/revoked) so a
-        # subsequent run starts with a clean buffer.
+        # Per-deployment ring buffer of recent events, for mid-stream
+        # subscribers. Reset when a deployment hits a terminal event.
         self._recent: dict[str, deque[dict[str, Any]]] = defaultdict(
             lambda: deque(maxlen=_RECENT_MAX)
         )
-        # Protects both maps. Both the listener thread (publish) and
-        # the asyncio loop (subscribe/unsubscribe) touch them.
+        # Protects both maps, touched by the listener thread (publish)
+        # and the asyncio loop (subscribe/unsubscribe).
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -146,20 +126,16 @@ class DeploymentPubSub:
         """Push ``event`` to every subscriber for ``deployment_id``.
 
         Threadsafe. If the loop hasn't been bound yet, the event is
-        dropped silently — at startup that's fine because no SSE
-        endpoint can be open before the loop is up either.
+        dropped from the live fan-out (no SSE endpoint can be open yet).
 
-        Also appends to the recent-events ring buffer so future
-        subscribers can be backfilled. Terminal lifecycle events
-        (``task-succeeded``/``task-failed``/``task-revoked``) clear
-        the buffer after the fan-out — by then the task row in the DB
-        has the canonical transcript and a new run for the same
-        deployment shouldn't inherit the previous run's tail.
+        Also appends to the recent-events ring buffer for backfill.
+        Terminal lifecycle events
+        (``task-succeeded``/``task-failed``/``task-revoked``) clear the
+        buffer after the fan-out.
         """
         loop = self._loop
         # Always append to the recent buffer, even if the loop isn't up
-        # yet. Subscribers that arrive later still benefit, and the
-        # listener thread shouldn't depend on FastAPI being ready.
+        # yet, so later subscribers still benefit.
         with self._lock:
             self._recent[deployment_id].append(event)
             queues = list(self._subs.get(deployment_id, ()))
@@ -168,10 +144,9 @@ class DeploymentPubSub:
             for queue in queues:
                 loop.call_soon_threadsafe(self._enqueue_or_drop, queue, event)
 
-        # Reset the buffer on terminal events so a follow-up run (e.g.
-        # destroy after deploy) starts clean. Done after the live
-        # fan-out so currently-connected subscribers still see the
-        # terminal frame.
+        # Reset the buffer on terminal events so a follow-up run starts
+        # clean. Done after the live fan-out so connected subscribers
+        # still see the terminal frame.
         if event.get("type") in ("task-succeeded", "task-failed", "task-revoked"):
             with self._lock:
                 self._recent.pop(deployment_id, None)

@@ -1,27 +1,21 @@
 """Live-status joiner for the deployment Infrastructure tab.
 
 Marries the cached Terraform state (parsed by ``tf_state_parser``)
-with live OpenStack data fetched through the per-user ``Connection``
-helper from ``openstack_client``. Two stages — see the plan in
-``.claude/plans/`` and the design doc — corresponding to two
-endpoints:
+with live OpenStack data via the per-user ``Connection`` helper from
+``openstack_client``. Two stages, one per endpoint:
 
-* **Stufe 1** (list view, ``build_resource_views``): one
+* Stage 1 (list view, ``build_resource_views``): one
   ``Connection.compute.find_server`` per compute instance, in a small
-  ThreadPool with per-call timeout. Cheap enough to run on every GET
-  of the resource list, even at 8+ teams.
+  ThreadPool with per-call timeout. Cheap enough for every list GET.
 
-* **Stufe 2** (drawer view, ``build_resource_detail``): for a SINGLE
+* Stage 2 (drawer view, ``build_resource_detail``): for a single
   compute instance, pull ports / security-group rule counts / volume
-  attachments. Called only when the user opens the drawer on a card
-  — keeps the list endpoint snappy.
+  attachments. Called only when the user opens the drawer.
 
-Failure handling: a single live-fetch failure (timeout, server gone,
-provider hiccup) MUST NOT fail the whole endpoint. Each VM degrades
-independently to ``drift=missing`` (live-fetch returned nothing) or
-``drift=stale`` (live-fetch raised). The TF-cached attributes
-survive on the response so the UI can still render *something* for a
-flaky server.
+A single live-fetch failure must not fail the whole endpoint: each VM
+degrades independently to ``drift=missing`` (fetch returned nothing) or
+``drift=stale`` (fetch raised), and TF-cached attributes survive so the
+UI can still render something.
 """
 
 from __future__ import annotations
@@ -40,19 +34,15 @@ from app.services.tf_state_parser import TfResource, parse_tf_state
 logger = logging.getLogger(__name__)
 
 
-# Per-VM live-fetch budget. OpenStack ``find_server`` against a
-# healthy cloud is ~200ms; we allow 5s before declaring the server
-# stale. The ThreadPool fans out so the total endpoint latency is
-# ``max(per_call)`` not ``sum(per_call)``.
+# Per-VM live-fetch budget. The ThreadPool fans out so total endpoint
+# latency is ``max(per_call)`` not ``sum(per_call)``.
 _PER_SERVER_TIMEOUT_S = 5.0
 _MAX_PARALLEL_FETCHES = 8
 
 
 # Live-status enums kept narrow so the frontend can switch on them.
-# ``status``/``vm_state``/``power_state``/``task_state`` are passed
-# through as-is from the OpenStack response — the API has a stable
-# vocabulary there (ACTIVE/BUILD/ERROR/...), trying to remap would
-# just lose information.
+# ``status``/``vm_state``/``power_state``/``task_state`` pass through
+# as-is from OpenStack (stable vocabulary: ACTIVE/BUILD/ERROR/...).
 ResourceDrift = Literal["in_sync", "stale", "missing"]
 
 
@@ -64,8 +54,7 @@ class LifecycleStates:
     vm_state: str | None = None
     power_state: str | None = None
     # Only set when ``status == "ERROR"`` — Nova fills ``fault.message``
-    # with the underlying scheduler / hypervisor error, which is exactly
-    # what the user needs to read to decide "redeploy" vs. "open ticket".
+    # with the underlying error the user needs to act on.
     fault_message: str | None = None
 
 
@@ -82,8 +71,7 @@ class HardwareSpec:
     image_name: str | None = None
     availability_zone: str | None = None
     # ISO-8601 timestamp from ``OS-SRV-USG:launched_at``; the frontend
-    # computes uptime against ``now`` so the value is server-clock-
-    # robust and survives wizard reopens.
+    # computes uptime against ``now``.
     launched_at: str | None = None
 
 
@@ -110,9 +98,7 @@ class NetworkPort:
 
 @dataclass
 class SecurityGroupSummary:
-    """Stage-2: not the full rule dump, just a count summary plus the
-    SG metadata. Rendering the full rule list is left to a future
-    expand-toggle in the drawer."""
+    """Stage-2: a count summary plus SG metadata (not the full rule dump)."""
     id: str
     name: str
     description: str | None
@@ -230,11 +216,9 @@ def _enrich_instances_stage1(
         view.hardware = _hardware_from(server)
         view.addresses = _addresses_from(server)
 
-    # ThreadPool fans out the per-server calls. Per-call timeout
-    # enforcement uses ``Future.result(timeout=...)``. The SDK call
-    # itself is the slow part; cancelling the future doesn't cancel
-    # the underlying HTTP request, but the future is abandoned and
-    # the response is ignored. Acceptable for this use case.
+    # ThreadPool fans out the per-server calls with a per-call timeout
+    # via ``Future.result(timeout=...)``. A timed-out future is
+    # abandoned (the underlying HTTP request isn't cancelled).
     if not instance_views:
         return
     workers = min(_MAX_PARALLEL_FETCHES, len(instance_views))
@@ -339,9 +323,7 @@ def _fetch_sg_summaries(
     conn: Any, ports: list[NetworkPort]
 ) -> list[SecurityGroupSummary]:
     """Resolve the distinct SG IDs referenced by the ports into a
-    per-SG summary. We don't dump the full rule list — the drawer's
-    expand-toggle (future) would do that; for the summary we just
-    count ingress/egress."""
+    per-SG summary with ingress/egress counts (not the full rule list)."""
     sg_ids: set[str] = set()
     for p in ports:
         for sid in p.security_group_ids:
@@ -377,11 +359,10 @@ def _fetch_sg_summaries(
 
 
 def _fetch_volumes(conn: Any, server_id: str) -> list[VolumeAttachment]:
-    """Build the per-volume attachment list. Two API hops: compute
-    gives us the attachments (volume_id + device), block_storage
-    gives us size/bootable/status. We tolerate either side failing
-    independently — a missing block_storage just leaves the size
-    fields None."""
+    """Build the per-volume attachment list. Two API hops: compute for
+    attachments (volume_id + device), block_storage for
+    size/bootable/status. Either side may fail independently — a missing
+    block_storage just leaves the size fields None."""
     out: list[VolumeAttachment] = []
     try:
         attachments = list(conn.compute.volume_attachments(server=server_id))
@@ -439,10 +420,8 @@ def _resolve_image_name(conn: Any, image_id: str) -> str | None:
 def _lifecycle_from(server: Any) -> LifecycleStates:
     """Pull the four lifecycle states + fault message from a server.
 
-    The SDK exposes some fields as snake_case attributes
-    (``task_state``) and some via the raw ``OS-EXT-*`` keys
-    (``vm_state``). We try the canonical name first and fall back to
-    ``getattr`` chain on the SDK object — robust to either flavor.
+    Tries the canonical snake_case attribute first, falling back to the
+    raw ``OS-EXT-*`` keys, so it's robust to either SDK flavor.
     """
     status = getattr(server, "status", None)
     fault = None

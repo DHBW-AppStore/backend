@@ -147,11 +147,9 @@ def set_app_image(
 def soft_delete_app(db: Session, app_id: UUID) -> bool:
     """Mark an app as deleted without removing the row.
 
-    The row stays so existing ``deployments.appId`` foreign keys
-    keep resolving (the audit trail of past deployments referencing
-    this app survives), but list queries skip it. Hard-delete is
-    no longer exposed — the only way to bring an app back is to
-    clear ``deleted_at`` directly via SQL.
+    The row stays so existing ``deployments.appId`` foreign keys keep
+    resolving, but list queries skip it. Restoring an app means clearing
+    ``deleted_at`` directly via SQL.
     """
     db_app = get_app(db, app_id)
     if not db_app:

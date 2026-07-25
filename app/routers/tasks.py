@@ -5,15 +5,10 @@ Read-only access to task information for a deployment. Tasks are created by the
 deployment flow itself; this router exposes status and details so the frontend
 can render progress.
 
-Every endpoint enforces deployment-level access via `ensure_deployment_access`
-to prevent IDOR — without it, any authenticated user could read foreign task
-logs (which include Terraform outputs, IPs, etc.).
-
-Tasks contain operational data — terraform stdout/stderr, packer build chatter,
-worker stack traces — that members shouldn't see. Endpoints additionally
-enforce ``ensure_deployment_owner_view`` so only the deployment creator,
-teachers, and admins can fetch them. Members get a 403 here even though they
-can read the deployment metadata via ``GET /deployments/{id}``.
+Every endpoint enforces ``ensure_deployment_access`` (to prevent IDOR) plus
+``ensure_deployment_owner_view``, so only the deployment creator, teachers, and
+admins can read task logs — which contain Terraform outputs, IPs, and worker
+stack traces. Members get a 403 even though they can read deployment metadata.
 """
 
 from uuid import UUID

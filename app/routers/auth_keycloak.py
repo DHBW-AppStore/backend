@@ -1,12 +1,8 @@
 """
 Auth Router - Keycloak Version
 
-Phase 2 cleanup (Bug #25): the redundant ``/auth/me`` endpoint is gone.
-Use ``/users/me`` — it returns the richer ``UserWithCourse`` shape and
-is the single source of truth for "who am I".
-
-The only path still served here is the public health check, kept so
-operators can probe the auth subsystem without authenticating.
+Serves the public auth health check so operators can probe the auth
+subsystem without authenticating. "Who am I" lives at ``/users/me``.
 """
 from fastapi import APIRouter
 

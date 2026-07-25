@@ -142,12 +142,9 @@ def send_email(
     msg.attach(MIMEText(html_body, "html", _charset="utf-8"))
 
     try:
-        # 30s timeout: Gmail's STARTTLS handshake from a fresh
-        # connection occasionally takes 10-15s on first contact;
-        # 15s was triggering spurious timeouts on cold paths.
-        # Port 465 = implicit TLS (SMTPS); anything else = STARTTLS.
-        # Gmail accepts either; corporate networks that block 587
-        # often still allow 465.
+        # 30s timeout: Gmail's STARTTLS handshake can take 10-15s on
+        # first contact. Port 465 = implicit TLS (SMTPS); anything else
+        # = STARTTLS. Gmail accepts either.
         if settings.SMTP_PORT == 465:
             ctx = ssl.create_default_context()
             with smtplib.SMTP_SSL(

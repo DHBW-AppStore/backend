@@ -48,13 +48,10 @@ def get_keycloak_admin() -> KeycloakAdmin:
 # ----------------------------------------------------------------
 # PUBLIC KEY CACHE
 # ----------------------------------------------------------------
-# python-keycloak's public_key() does a fresh HTTP GET to the realm
-# endpoint on every call. We hit it on every authenticated request,
-# which adds ~1s of latency to each call in a local Docker stack.
-# The realm signing key is stable for the process lifetime, so we
-# cache the PEM-formatted key after the first fetch. On rotation,
-# restart the process — the same trade-off the rest of the codebase
-# already accepts (settings, DB engine, etc.).
+# python-keycloak's public_key() does a fresh HTTP GET on every call,
+# which we make on every authenticated request. The realm signing key
+# is stable for the process lifetime, so we cache the PEM-formatted key
+# after the first fetch; restart the process on key rotation.
 _public_key_pem: str | None = None
 _public_key_lock = threading.Lock()
 
@@ -183,18 +180,13 @@ def sync_user_from_keycloak(db: Session, keycloak_user_data: dict) -> User:
         return user
 
     updated = False
-    # Email is the only identifier our app trusts (Keycloak's
-    # ``sub``/``id`` is a UUID we use as the foreign key, but every
-    # display, search, and notification uses ``email``). When the
-    # Keycloak record changes — user updated their address, admin
-    # corrected a typo — we have to follow.
+    # Email is the identifier used for display, search, and
+    # notifications; follow the Keycloak record when it changes.
     if email and user.email != email:
         user.email = email
         updated = True
-    # Same story for username: it's the login identifier shown in
-    # both the UI and the Terraform-issued credentials. The fallback
-    # in ``sync_user_from_keycloak`` makes ``username`` always a
-    # non-empty string, so we don't need a truthy guard.
+    # Username is the login identifier shown in the UI and in
+    # Terraform-issued credentials; keep it in sync too.
     if username and user.username != username:
         user.username = username
         updated = True
@@ -318,25 +310,19 @@ def get_keycloak_users_by_ids(ids: list[str]) -> dict:
 def refresh_user_from_keycloak(db: Session, user: User) -> User:
     """Pull the latest Keycloak record for ``user`` and reconcile our DB row.
 
-    Used by paths that have to address a user *outside* of an active
-    HTTP request — most importantly the mail notifier. Without this,
-    an address change between the wizard pick and the deploy finishing
-    would silently send credentials to the previous email. We re-query
-    the Admin API right before composing the mail so the recipient
-    is always whatever Keycloak currently says it is.
+    Used by paths that address a user outside of an active HTTP request
+    (most importantly the mail notifier) so credentials go to the
+    current email even if it changed since the wizard pick.
 
     Best-effort by design:
 
-    * If the user has no ``keycloak_id`` (legacy row from before
-      JIT-provisioning landed), nothing to refresh — return the row
-      unchanged.
-    * If the Admin API is down or the user was deleted in Keycloak,
-      we log at WARNING and return the row unchanged. The caller
-      proceeds with the last-known-good email so a flaky KC doesn't
-      block notifications entirely.
+    * If the user has no ``keycloak_id``, there is nothing to refresh —
+      return the row unchanged.
+    * If the Admin API is down or the user was deleted in Keycloak, log
+      at WARNING and return the row unchanged so a flaky KC doesn't
+      block notifications.
 
-    Reuses :func:`sync_user_from_keycloak` for the actual DB write so
-    the field-by-field reconciliation logic stays in one place.
+    Reuses :func:`sync_user_from_keycloak` for the DB write.
     """
     if not user or not getattr(user, "keycloak_id", None):
         return user
@@ -360,12 +346,10 @@ def refresh_user_from_keycloak(db: Session, user: User) -> User:
         )
         return user
 
-    # ``get_user`` doesn't include realm roles; preserving the existing
-    # role on the DB row is the right default — role rotation is a
-    # separate flow that goes through the auth dependency on the next
-    # login. ``sync_user_from_keycloak`` re-runs role mapping over
-    # whatever ``roles`` we hand it, so we pre-seed with the current
-    # mapping to avoid a spurious role downgrade.
+    # ``get_user`` doesn't include realm roles; pre-seed with the
+    # current role mapping so re-running role mapping doesn't cause a
+    # spurious downgrade. Role rotation goes through the auth dependency
+    # on next login.
     current_role_token = []
     if user.role == UserRole.ADMIN:
         current_role_token = ["admin"]
@@ -386,8 +370,7 @@ def refresh_user_from_keycloak(db: Session, user: User) -> User:
         )
     except HTTPException as e:
         # ``sync_user_from_keycloak`` raises 400 when KC returns a user
-        # without an email — extremely unlikely for an existing
-        # account, but defend in depth so a one-off bad record doesn't
+        # without an email; defend in depth so a bad record doesn't
         # block the notifier.
         logger.warning(
             "refresh_user_from_keycloak: sync rejected KC payload for %s: %s",

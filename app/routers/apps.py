@@ -74,42 +74,33 @@ router = APIRouter()
 # ----------------------------------------------------------------
 # Pydantic schema for the /apps/{id}/variables response
 # ----------------------------------------------------------------
-# Bug #10 — der Endpoint lieferte vorher ``list[dict[str, Any]]`` und
-# damit kein OpenAPI-Schema. Wir spiegeln hier die genauen Keys, die
-# ``_parse_one_variable`` heute liefert (gemischt snake/camelCase),
-# damit das Frontend ohne Anpassung weiterläuft und das generierte
-# OpenAPI-Dokument den Wizard-Vertrag dokumentiert.
+# Mirrors the exact keys ``_parse_one_variable`` returns (mixed
+# snake/camelCase) so the frontend and generated OpenAPI stay in sync.
 class _MarkerErrorPayload(BaseModel):
     variable: str
     message: str
     location: str
-    # ``code`` ist neu (siehe MarkerError-Schema oben); existierende
-    # Clients ignorieren das Feld einfach.
     code: str | None = None
 
 
 class AppVariableResponse(BaseModel):
     """Shape of one entry in ``GET /apps/{id}/variables``.
 
-    Keys match what ``_parse_one_variable`` writes to the dict
-    EXACTLY — the frontend (NewDeploymentVariableView.vue) reads
-    ``osType``/``osMode``/``osMulti``/``osScope``/``varScope``/
-    ``fileExtensions`` in camelCase and the rest in snake/lowercase.
-    Don't auto-aliaserate here; we keep the keys verbatim.
+    Keys match what ``_parse_one_variable`` writes to the dict exactly —
+    the frontend reads ``osType``/``osMode``/``osMulti``/``osScope``/
+    ``varScope``/``fileExtensions`` in camelCase and the rest in
+    snake/lowercase. Keys are kept verbatim (no auto-aliasing).
     """
 
-    # ``populate_by_name`` lets callers construct with either field
-    # name or alias; we keep the dict-style names as the canonical
-    # source (mostly because the existing code path builds a dict
-    # and we use ``.model_validate`` over it).
+    # ``populate_by_name`` lets callers construct with either field name
+    # or alias; the dict-style names are the canonical source.
     model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     name: str
     type: str
     description: str | None = None
-    # Bug #7 — Default ist jetzt typisiert (Number/Bool/List/Dict/None),
-    # nicht mehr nur String. ``Any`` ist hier bewusst breit, weil HCL
-    # eine ganze Literal-Familie abdeckt.
+    # Default is typed (Number/Bool/List/Dict/None); ``Any`` is
+    # deliberately broad because HCL covers a whole literal family.
     default: Any | None = None
     required: bool
     source: str
@@ -130,79 +121,53 @@ class AppVariableResponse(BaseModel):
 
 
 # ----------------------------------------------------------------
-# OPENSTACK-MARKER PARSING (HCL VARIABLES)
+# OPENSTACK MARKER PARSING (HCL VARIABLES)
 # ----------------------------------------------------------------
-# Apps deklarieren Value-Help für OpenStack-Resourcen ausschließlich
-# über einen expliziten Marker in der ``description`` der Variable.
-# KEINE Heuristik. Keine Namens-Inferenz. Keine Description-Substring-
-# Matches. Wer den Marker nicht setzt, bekommt schlicht einen Free-Text-
-# Input — zero magic, voller Kontrolle für den App-Autor.
+# Apps declare value-help for OpenStack resources exclusively via an
+# explicit marker in the variable's ``description``. No heuristics, no
+# name inference. A variable without a marker renders as free text.
 #
-# Grammatik (positional, mit Defaults):
+# Grammar (positional, with defaults):
 #
 #     @openstack:<type>[:<mode>][:<multi>][:<var_scope>]
 #
-#   <type>   — eine der unten gelisteten Resource-Kinds (siehe ``_OS_TYPES``)
-#              ODER LEER. Ein leerer Type-Slot ist erlaubt, wenn der Marker
-#              ausschließlich dazu dient, einen ``var_scope`` zu setzen
-#              (Beispiel: ``@openstack:::user`` markiert eine sonst freie
-#              String-Variable als per-User-scoped, ohne einen Resource-
-#              Picker zu erzwingen).
-#   <mode>   — 'id' | 'name'   (default: 'name'; siehe auch
-#              ``_NAME_ONLY_TYPES`` für Resourcen, bei denen 'id' praktisch
-#              sinnlos ist)
-#   <multi>  — 'multi' | 'list' | 'single'  ('list' ist Synonym für 'multi'.
-#              Default ohne Marker-Slot: aus dem HCL-Typ abgeleitet —
-#              ``list(...)``/``set(...)``/``tuple(...)``/``list``/``set``
-#              → multi, sonst single. ``map(...)`` und ``object(...)`` sind
-#              technische Kollektionen, gelten hier aber als single — wer
-#              die als Multi will, schreibt ``:multi`` explizit.)
-#   <var_scope> — 'all' | 'team' | 'user'   (default: 'all'). Steuert, ob
-#              der Wizard genau EIN Eingabefeld rendert (``all``), eines
-#              pro Team (``team``) oder eines pro User (``user``). Bei
-#              ``team``/``user`` muss der HCL-Type eine ``map(...)`` sein,
-#              weil das Backend die Slot-Map 1:1 in die Terraform-
-#              Variable schreibt. Für Packer-Variablen ist nur ``all``
-#              erlaubt — ein Image wird einmal gebaut und kann nicht
-#              per-Team divergieren.
+#   <type>   — one of the resource kinds in ``_OS_TYPES``, OR EMPTY. An
+#              empty type slot is allowed when the marker only sets a
+#              ``var_scope`` (e.g. ``@openstack:::user`` scopes an
+#              otherwise free string variable per-user).
+#   <mode>   — 'id' | 'name' (default 'name'; see ``_NAME_ONLY_TYPES``).
+#   <multi>  — 'multi' | 'list' | 'single' ('list' is a synonym for
+#              'multi'). Default derives from the HCL type:
+#              ``list``/``set``/``tuple`` → multi, else single.
+#              ``map(...)``/``object(...)`` count as single.
+#   <var_scope> — 'all' | 'team' | 'user' (default 'all'). Controls
+#              whether the wizard renders one input (``all``), one per
+#              team, or one per user. ``team``/``user`` require a
+#              ``map(...)`` HCL type. Packer variables allow only ``all``.
 #
-# Beispiele:
-#     @openstack:network                        → network, name-mode, multi aus HCL
-#     @openstack:network:id                     → network, id-mode
-#     @openstack:security_group:name:multi      → SG, name-mode, multi
-#     @openstack:flavor::multi                  → leerer Mode-Slot ⇒ default 'name'
-#     @openstack:image:id:single                → image, id-mode, single (auch wenn
-#                                                  HCL ``list(string)`` wäre →
-#                                                  Konfliktcheck schlägt zu)
-#     @openstack:flavor:id:single:team          → pro Team eine Flavor-ID; HCL muss
-#                                                  ``map(string)`` sein.
-#     @openstack:::user                         → reine Free-Text-Variable, pro User
-#                                                  scoped; HCL muss ``map(...)`` sein.
+# Examples:
+#     @openstack:network                    → network, name-mode, multi from HCL
+#     @openstack:network:id                 → network, id-mode
+#     @openstack:security_group:name:multi  → SG, name-mode, multi
+#     @openstack:flavor::multi              → empty mode slot ⇒ default 'name'
+#     @openstack:flavor:id:single:team      → one flavor ID per team; map(string)
+#     @openstack:::user                     → free-text, per-user scoped; map(...)
 #
-# Der Marker darf an einer beliebigen Stelle in der Description stehen,
-# muss aber an einem Wort-Ende terminieren (Whitespace, Zeilenende oder
-# Satzzeichen `.,;:!?)]"'`).
+# The marker may appear anywhere in the description but must terminate at
+# a word boundary. With multiple markers, the first with a KNOWN type
+# wins; markers with unknown types are skipped. If no marker has a known
+# type, that's an error (reported with a "did you mean …?" hint).
 #
-# Mehrere Marker in einer Description: der erste mit BEKANNTEM Type
-# gewinnt. Marker mit unbekanntem Type (z.B. „migration:
-# ``@openstack:vm`` → ``@openstack:network``" als Doku-Snippet) werden
-# übersprungen, damit der echte Marker dahinter trotzdem zieht. Wenn
-# KEIN Marker einen bekannten Type hat, ist das ein Fehler (der erste
-# unbekannte wird mit ``meintest du …?``-Hint gemeldet).
-#
-# Fehlerbehandlung: malformierte ODER ungültige Marker werfen eine
-# ``MarkerError``. Diese wird beim Parser pro Variable gefangen und im
-# Variable-Payload als ``markerError``-Feld an das Frontend mitgesendet
-# — die betroffene Variable rendert dann als Free-Text mit Inline-Hint,
-# alle anderen Variablen bleiben benutzbar. Dadurch ist EIN Tippfehler
-# kein Wizard-Showstopper, der App-Autor sieht ihn aber direkt im UI.
+# Error handling: malformed or invalid markers raise ``MarkerError``,
+# caught per-variable and attached to the payload as ``markerError`` so
+# that variable renders as free text with an inline hint while the rest
+# stay usable.
 # ----------------------------------------------------------------
 
-# Liste der unterstützten OpenStack-Resource-Types. Muss konsistent
-# sein mit:
-#  - backend/app/routers/openstack_resources.py (Listen-Endpoints)
+# Supported OpenStack resource types. Must stay consistent with:
+#  - backend/app/routers/openstack_resources.py (list endpoints)
 #  - frontend/src/types/index.ts (`AppVariableOsType`)
-#  - frontend/src/components/OpenStackResourcePicker.vue (Render)
+#  - frontend/src/components/OpenStackResourcePicker.vue (render)
 _OS_TYPES: set[str] = {
     "network",
     "subnet",
@@ -219,8 +184,8 @@ _OS_TYPES: set[str] = {
     # widget and route the bytes into ``userInputVar.terraform`` so the
     # template can drop them onto the VM via cloud-init ``write_files``.
     # The mode slot carries the scope (``all``/``team``/``user``); the
-    # multi slot carries the PFLICHT-Endungsfilter (z.B. ``pdf`` oder
-    # ``pdf|docx``) — ein File-Marker ohne Filter wird abgelehnt.
+    # multi slot carries the mandatory extension filter (e.g. ``pdf`` or
+    # ``pdf|docx``) — a file marker without a filter is rejected.
     "file",
 }
 
@@ -229,95 +194,81 @@ _OS_TYPES: set[str] = {
 # while teaching the parser to interpret the slot per-type.
 _FILE_SCOPES: set[str] = {"all", "team", "user"}
 
-# Pflicht-Filter im vierten Marker-Slot bei File-Variablen. Wir
-# erlauben nur Buchstaben+Ziffern und ``|`` als Trenner; case-
-# insensitive matchen, intern lowercased. Beispiele: ``pdf``,
-# ``pdf|docx|txt``. Kein Leerwert — ein File-Marker ohne Filter
-# ist Fehler.
+# Mandatory extension filter in the fourth marker slot for file
+# variables. Only letters/digits and ``|`` as separator; matched
+# case-insensitively, lowercased internally. Examples: ``pdf``,
+# ``pdf|docx|txt``. Empty is not allowed.
 _FILE_EXTENSIONS_RE = re.compile(r"^[a-z0-9]+(?:\|[a-z0-9]+)*$")
 
-# Erlaubte Werte für den allgemeinen ``var_scope``-Slot (vierter
-# Slot bei non-file-Markern). ``all`` ist der Default — Variablen
-# ohne Marker sowie Marker ohne 4. Slot werden auf ``all`` aufgelöst.
+# Allowed values for the general ``var_scope`` slot (fourth slot on
+# non-file markers). ``all`` is the default — variables without a marker
+# and markers without a 4th slot resolve to ``all``.
 _VAR_SCOPES: set[str] = {"all", "team", "user"}
 
-# Resource-Kinds, die in OpenStack faktisch keine UUID haben oder
-# durchgängig namensbasiert adressiert werden — z.B. Keypairs (Nova
-# nutzt nur Namen), Availability Zones (haben gar keine UUID),
-# Floating-IP-Pools (External Networks, in Modulen via Name).
+# Resource kinds that effectively have no UUID in OpenStack or are
+# addressed by name throughout — e.g. keypairs (Nova uses names only),
+# availability zones (no UUID at all), floating-IP pools (external
+# networks, referenced by name in modules).
 #
-# Marker-only-Modus: dieser Default greift NUR, wenn der Autor mode
-# weglässt. ``@openstack:keypair`` → mode='name'. ``@openstack:keypair:id``
-# wird respektiert (App-Autor weiß was er tut), aber praktisch sinnlos.
-# Wir warnen nicht aktiv — wer einen Picker für UUID-lose Resourcen will,
-# bekommt eben eine leere ID-Liste und merkt es spätestens beim Deploy.
+# The name-only default applies ONLY when the author omits the mode.
+# ``@openstack:keypair`` → mode='name'. ``@openstack:keypair:id`` is
+# respected but practically pointless (yields an empty ID list).
 _NAME_ONLY_TYPES: set[str] = {"keypair", "availability_zone", "floating_ip_pool"}
 
-# Marker-Regex. Wir matchen das ganze Token an Wort-Grenzen, damit
-# Beispiele in Prosa wie ``"siehe @openstack:network in der Doku"``
-# erkannt werden, aber ein zufälliges ``"@openstackbar"`` NICHT matcht.
-# Slot-Inhalt darf KEIN Whitespace haben. Fünf oder mehr Doppelpunkte
-# = malformed (siehe ``_TOO_MANY_SEGMENTS_RE``).
+# Marker regex. Matches the whole token at word boundaries so prose
+# examples like ``"see @openstack:network in the docs"`` are recognised
+# but ``"@openstackbar"`` is not. Slot content may not contain
+# whitespace. Five or more colons = malformed (see
+# ``_TOO_MANY_SEGMENTS_RE``).
 #
-# Boundary-Zeichen rechts: alles was kein Identifier-Zeichen ist —
-# Whitespace, Zeilenende, gängige Satzzeichen ``. , ; : ! ? ) ] " '``.
-# Linke Grenze: Anfang oder dieselben Boundary-Zeichen.
+# Right boundary: any non-identifier char — whitespace, line end, common
+# punctuation ``. , ; : ! ? ) ] " '``. Left boundary: start or the same.
 #
-# Slot-Inhalte:
-#  * Slot 1 (type): ``[A-Za-z][A-Za-z0-9_]*`` oder LEER. Ein leerer
-#    Type-Slot ist semantisch „nur var_scope setzen, kein Resource-
-#    Picker erzwingen".
-#  * Slots 2/3: ``[A-Za-z]*`` (heutiges Verhalten).
-#  * Slot 4 (var_scope für non-file, file-extensions-Filter für file):
-#    ``[A-Za-z0-9|]*``. Das ``|`` ist nur für den File-Filter-Fall
-#    nötig (z.B. ``pdf|docx``); für var_scope-Werte wäre es überflüssig,
-#    schadet aber nicht. Die semantische Trennung passiert im Parser.
+# Slot content:
+#  * Slot 1 (type): ``[A-Za-z][A-Za-z0-9_]*`` or EMPTY. An empty type
+#    slot means "only set var_scope, don't force a resource picker".
+#  * Slots 2/3: ``[A-Za-z]*``.
+#  * Slot 4 (var_scope for non-file, file-extensions filter for file):
+#    ``[A-Za-z0-9|]*``. The ``|`` is only needed for the file-filter
+#    case (e.g. ``pdf|docx``); the parser splits the semantics.
 _MARKER_RE = re.compile(
     r"""
-    (?:^|(?<=[\s.,;:!?()\[\]"']))   # Linke Grenze: Anfang oder Whitespace/Satzzeichen
+    (?:^|(?<=[\s.,;:!?()\[\]"']))   # Left boundary: start or whitespace/punctuation
     @openstack
-    :([A-Za-z][A-Za-z0-9_]*)?       # 1: type (kann leer sein → nur-scope-Marker)
-    (?::([A-Za-z]*))?               # 2: mode-Slot (kann leer sein)
-    (?::([A-Za-z]*))?               # 3: multi-Slot (kann leer sein)
-    (?::([A-Za-z0-9|]*))?           # 4: var_scope / file-extensions (kann leer sein)
-    (?=$|[\s.,;:!?)\]"'])           # Rechte Grenze
+    :([A-Za-z][A-Za-z0-9_]*)?       # 1: type (may be empty → scope-only marker)
+    (?::([A-Za-z]*))?               # 2: mode slot (may be empty)
+    (?::([A-Za-z]*))?               # 3: multi slot (may be empty)
+    (?::([A-Za-z0-9|]*))?           # 4: var_scope / file-extensions (may be empty)
+    (?=$|[\s.,;:!?)\]"'])           # Right boundary
     """,
-    # IGNORECASE: Bug #13 — Marker-Prefix soll case-insensitive akzeptiert
-    # werden (``@OpenStack:flavor`` ist die gleiche Intent wie
-    # ``@openstack:flavor``). Die nachgelagerte Lowercasing-Pipeline in
-    # ``_parse_marker`` normalisiert die Slot-Inhalte unverändert.
+    # Marker prefix is accepted case-insensitively (``@OpenStack:flavor``
+    # == ``@openstack:flavor``); ``_parse_marker`` lowercases slot content.
     re.VERBOSE | re.IGNORECASE,
 )
 
-# Bug #12 — Whitespace zwischen Marker-Segmenten silently truncate:
-# Erkennt einen direkt nach einem Match weiterführenden
-# „<whitespace>:<token>"-Fortsetzungsversuch (z.B.
-# ``@openstack:flavor :id``). ``_MARKER_RE`` stoppt am Whitespace und
-# würde den Rest ignorieren — wir feuern hier einen expliziten Fehler,
-# damit der Tippfehler sichtbar wird.
+# Detects a ``<whitespace>:<token>`` continuation right after a match
+# (e.g. ``@openstack:flavor :id``). ``_MARKER_RE`` stops at the
+# whitespace, so we raise an explicit error to surface the typo.
 _MARKER_WHITESPACE_CONT_RE = re.compile(r"\s+:\s*[A-Za-z]")
 
-# Komma als Slot-Trenner ist ein häufiger Tippfehler — siehe Erläuterung
-# an der Call-Site. Match Form: ``<tail starts with>,<token-char>``.
+# A comma as a slot separator is a common typo — see the call site.
+# Match form: ``<tail starts with>,<token-char>``.
 _MARKER_COMMA_CONT_RE = re.compile(r",\s*[A-Za-z0-9|]")
 
-# Schnell-Check: der Marker hat zu viele Segmente?
-# ``@openstack:network:id:multi:team:extra`` → fail.
-# Wir verlangen, dass JEDES der 5+ Segmente nicht-leer ist, sonst
-# würde ``@openstack:network:id:multi:team:`` (Trailing-Colon, klare
-# 4-Slot-Form) fälschlich als „zu viele Segmente" gefangen.
+# Quick check: does the marker have too many segments?
+# ``@openstack:network:id:multi:team:extra`` → fail. Every 5+ segment
+# must be non-empty, otherwise a trailing-colon 4-slot form would be
+# wrongly caught.
 _TOO_MANY_SEGMENTS_RE = re.compile(
     r"@openstack(?::[A-Za-z0-9_|]+){5,}",
     re.IGNORECASE,
 )
 
 
-# Erkennung eines „Marker-versuchten-aber-falsch"-Inputs. Wir feuern,
-# wenn die Description ``@openstack:`` enthält, der strikte Marker-Regex
-# aber NICHTS findet. Typische Fälle: Bindestrich/Slash/Equals als
-# Trenner, Whitespace im Marker, leerer Type, kaputte Typen, ...
-# Wir matchen `@openstack` gefolgt von `:` ODER von Whitespace+`:`,
-# damit „@openstack: <type>" auch greift.
+# Detects a marker-attempted-but-malformed input: fires when the
+# description contains ``@openstack:`` but the strict regex matches
+# nothing (dash/slash/equals separators, whitespace, empty type, etc.).
+# Matches ``@openstack`` followed by ``:`` or whitespace+``:``.
 _BAD_PREFIX_RE = re.compile(
     r"@openstack\s*:",
     re.IGNORECASE,
@@ -325,17 +276,13 @@ _BAD_PREFIX_RE = re.compile(
 
 
 class MarkerError(ValueError):
-    """
-    Erhoben, wenn ein ``@openstack``-Marker syntaktisch oder semantisch
-    fehlerhaft ist. Wird im Endpoint in HTTP 400 übersetzt, damit der
-    App-Autor den Fehler sofort beim ersten ``GET /apps/{id}/variables``
-    sieht — statt dass die Variable stillschweigend als Free-Text-Input
-    erscheint.
+    """Raised when an ``@openstack`` marker is syntactically or
+    semantically invalid. Translated to HTTP 400 in the endpoint so the
+    app author sees the error on the first ``GET /apps/{id}/variables``
+    instead of the variable silently rendering as free text.
 
-    ``code`` ist ein stabiler, maschinen-lesbarer Fehler-Schlüssel
-    (z.B. ``MARKER_WHITESPACE``). Die ``message`` ist heute deutsch und
-    bleibt menschen-lesbar — der ``code`` macht künftige i18n möglich,
-    ohne dass das Frontend auf den genauen Text matchen müsste.
+    ``code`` is a stable machine-readable key (e.g. ``MARKER_WHITESPACE``);
+    ``message`` is human-readable German for now.
     """
 
     def __init__(self, var_name: str, message: str, code: str = "MARKER_INVALID"):
@@ -405,10 +352,8 @@ def _reject_malformed_markers(var_name: str, description: str) -> None:
     matches = list(_MARKER_RE.finditer(description))
     if not matches:
         # Strict hard-fail path: someone typed ``@openstack:`` but our
-        # grammar doesn't match — e.g. because of whitespace, a dash,
-        # ``=``, or a slash. Silently ignoring it would hide the bug
-        # (the variable renders as free-text and nobody notices). Fail
-        # loudly instead.
+        # grammar doesn't match — e.g. whitespace, a dash, ``=``, or a
+        # slash. Fail loudly rather than render the variable as free-text.
         if _BAD_PREFIX_RE.search(description):
             raise MarkerError(
                 var_name,
@@ -420,11 +365,10 @@ def _reject_malformed_markers(var_name: str, description: str) -> None:
             )
         return
 
-    # Bug #12 — whitespace between marker segments silently truncates:
+    # Whitespace between marker segments silently truncates:
     # ``_MARKER_RE`` stops at the first whitespace, so
-    # ``@openstack:flavor :id`` is only parsed as ``@openstack:flavor``
-    # and the ``:id`` slot drops out unnoticed. For EACH match we check
-    # whether a ``<whitespace>:<token>`` continuation follows the span
+    # ``@openstack:flavor :id`` parses only as ``@openstack:flavor``.
+    # For each match, check for a ``<whitespace>:<token>`` continuation
     # and raise a clear error instead of swallowing the typo.
     for m in matches:
         tail = description[m.end():]
@@ -440,11 +384,8 @@ def _reject_malformed_markers(var_name: str, description: str) -> None:
 
     # A comma as a slot separator is a common typo — the only allowed
     # separator is ``|`` (e.g. ``@openstack:file:all:pdf|docx``).
-    # ``_MARKER_RE`` matches only up to the comma, so ``,docx`` would
-    # linger as silent junk in the description. We detect
-    # ``<match>,<token>`` explicitly and raise a clear error so the app
-    # author sees the real cause instead of a cryptic "extension
-    # missing" error.
+    # ``_MARKER_RE`` matches only up to the comma, so we detect
+    # ``<match>,<token>`` explicitly and raise a clear error.
     for m in matches:
         tail = description[m.end():]
         if _MARKER_COMMA_CONT_RE.match(tail):
@@ -687,12 +628,11 @@ def _parse_marker_multi(var_name: str, raw_multi: str | None) -> bool | None:
 def _collection_check_type(type_lower: str, var_scope: str | None) -> str:
     """Return the HCL type to run the collection check against.
 
-    Bug #1 — ``:multi:team`` unreachable: for scope team/user the wizard
-    contract requires a ``map(...)`` HCL type. A naive ``is_collection``
-    check would fail (``map(list(string))`` starts with ``map(``) even
-    though the inner element type is a real collection. For scoped
-    markers we unwrap the outer ``map(...)`` and check the INNER type
-    against the multi expectation.
+    For scope team/user the wizard contract requires a ``map(...)`` HCL
+    type. A naive ``is_collection`` check would fail (``map(list(string))``
+    starts with ``map(``) even though the inner element type is a real
+    collection. For scoped markers we unwrap the outer ``map(...)`` and
+    check the INNER type against the multi expectation.
     """
     if var_scope not in ("team", "user") or not type_lower.startswith("map("):
         return type_lower
@@ -766,8 +706,7 @@ def _parse_resource_marker(
 
     type_lower = (var_type or "").strip().lower()
     # Parse the scope once; reused for both the inner-type collection
-    # lookup (Bug #1) and the returned value so the same error can't fire
-    # twice.
+    # lookup and the returned value so the same error can't fire twice.
     var_scope = _parse_var_scope(var_name, raw_scope)
     type_for_collection_check = _collection_check_type(type_lower, var_scope)
     _check_multi_type_conflict(var_name, var_type, type_for_collection_check, multi)
@@ -780,45 +719,38 @@ def _parse_marker(
     var_name: str, var_type: str, description: str, source: str = "terraform"
 ) -> tuple[str | None, str | None, bool | None, str | None, str | None, list[str] | None]:
     """
-    Parst den ``@openstack:<type>[:<mode>][:<multi>][:<var_scope>]``-Marker
-    aus der Description. Liefert ``(None, None, None, None, None, None)``
-    wenn KEIN Marker da ist (das ist KEIN Fehler — die Variable wird dann
-    als Free-Text gerendert).
+    Parse the ``@openstack:<type>[:<mode>][:<multi>][:<var_scope>]`` marker
+    from the description. Returns ``(None, None, None, None, None, None)``
+    when NO marker is present (not an error — the variable renders as free
+    text).
 
-    Multi-Marker-Verhalten: Findet die Funktion mehrere Marker, nimmt sie
-    den ersten, dessen Type bekannt ist ODER der einen leeren Type-Slot
-    hat (= reiner var_scope-Marker). Das ist absichtlich tolerant —
-    Apps zitieren manchmal ältere Marker-Schreibweisen in der Description
-    („migration: ``@openstack:vm`` → ``@openstack:network``"). Mode/Multi-
-    Validierungs-Fehler des gewählten Markers sind weiterhin hart, weil
-    sie konkret und nicht-tolerierbar sind.
+    Multi-marker behavior: if several markers are found, the first with a
+    known type OR an empty type slot (a pure var_scope marker) is used.
+    This is intentionally tolerant. Mode/multi validation errors of the
+    chosen marker remain hard failures.
 
-    Wirft ``MarkerError`` bei:
-      - malformiertem Marker (zu viele Segmente, internes Whitespace,
-        unbekannte mode/multi/scope-Tokens, Slot-Trenner mit Sonderzeichen
-        statt ``:``)
-      - widersprüchlichem Marker vs. HCL-Type (``:single`` mit
-        ``type = list(...)`` oder ``:multi`` mit ``type = number``;
-        ``:team``/``:user`` mit ``type = string``)
-      - file-spezifisch: ungültigem Scope (``@openstack:file:foo``),
-        fehlendem Endungs-Filter (``@openstack:file:all``) oder
-        ungültigem Filter (``@openstack:file:all:pdf,docx``).
-      - packer-source mit ``var_scope ∈ {team, user}``.
+    Raises ``MarkerError`` on:
+      - a malformed marker (too many segments, internal whitespace,
+        unknown mode/multi/scope tokens, wrong slot separators)
+      - a marker contradicting the HCL type (``:single`` with
+        ``type = list(...)`` or ``:multi`` with ``type = number``;
+        ``:team``/``:user`` with ``type = string``)
+      - file-specific: invalid scope, missing extension filter, or an
+        invalid filter.
+      - packer source with ``var_scope in {team, user}``.
 
     Returns: ``(os_type, mode, multi, file_scope, var_scope, file_exts)``.
 
-    * ``os_type``     — None, wenn der Marker leer-type war (= reiner
-                        var_scope-Marker).
-    * ``mode``        — nur für non-file gesetzt.
-    * ``multi``       — nur für non-file gesetzt.
-    * ``file_scope``  — nur für file gesetzt (``all``/``team``/``user``).
-    * ``var_scope``   — generischer Scope (``all``/``team``/``user``).
-                        Bei file-Variablen spiegelt das den ``file_scope``,
-                        damit der Wizard EINE einzige Quelle für Slot-
-                        Auflösung hat.
-    * ``file_exts``   — nur für file gesetzt: Liste erlaubter Endungen,
-                        z.B. ``["pdf", "docx"]``. Reihenfolge stabil
-                        gemäß Marker-Reihenfolge.
+    * ``os_type``     — None when the marker had an empty type (pure
+                        var_scope marker).
+    * ``mode``        — set for non-file only.
+    * ``multi``       — set for non-file only.
+    * ``file_scope``  — set for file only (``all``/``team``/``user``).
+    * ``var_scope``   — generic scope (``all``/``team``/``user``); for file
+                        variables it mirrors ``file_scope`` so the wizard
+                        has one source for slot resolution.
+    * ``file_exts``   — set for file only: list of allowed extensions
+                        (e.g. ``["pdf", "docx"]``), order stable.
 
     The heavy lifting is delegated to focused helpers: this function only
     orchestrates the pipeline (reject malformed → select marker →
@@ -852,27 +784,23 @@ def _apply_defaults(
     os_type: str, mode: str | None, multi: bool | None, var_type: str
 ) -> tuple[str, bool]:
     """
-    Wendet die dokumentierten Defaults an, wenn der Marker einzelne
-    Slots leer lässt:
+    Apply the documented defaults when the marker leaves slots empty:
 
-    - ``mode``: 'name'. Für Resourcen aus ``_NAME_ONLY_TYPES`` (Keypair,
-      Availability Zone, Floating-IP-Pool) ist 'name' nicht nur Default,
-      sondern faktisch die einzige sinnvolle Wahl — das Set ist trotzdem
-      nur informational, weil ``:id`` für diese Typen zwar respektiert
-      wird, aber kaum nutzbare Resultate liefert.
-    - ``multi``: aus HCL-Type abgeleitet — ``list(...)``/``set(...)``/
-      ``tuple(...)``/``list``/``set`` → True, sonst False.
+    - ``mode``: 'name'. For ``_NAME_ONLY_TYPES`` (keypair, availability
+      zone, floating-IP pool) 'name' is effectively the only useful
+      choice; ``:id`` is respected but yields little.
+    - ``multi``: derived from the HCL type — ``list``/``set``/``tuple``
+      → True, else False.
     """
     if mode is None:
         mode = "name"
 
     if multi is None:
         type_lower = (var_type or "").strip().lower()
-        # ``map(...)``/``object({...})`` sind technisch Kollektionen,
-        # aber der Picker kann sie nicht sinnvoll bedienen — wir
-        # behandeln sie als "single" und überlassen es dem Autor, das
-        # mit einem expliziten ``:multi`` zu fordern, falls er das wirklich
-        # will. ``list``/``set``/``tuple`` werden als multi auto-detected.
+        # ``map(...)``/``object({...})`` are technically collections but
+        # the picker can't drive them, so we treat them as "single" and
+        # leave it to the author to request ``:multi`` explicitly.
+        # ``list``/``set``/``tuple`` are auto-detected as multi.
         multi = (
             type_lower.startswith(("list(", "set(", "tuple("))
             or type_lower in ("list", "set")
@@ -883,9 +811,8 @@ def _apply_defaults(
 
 def _closest_match(s: str, candidates: set[str]) -> str | None:
     """
-    Sehr einfache Levenshtein-1-Heuristik für „meintest du …?"-Hints.
-    Wir laden ``difflib`` lazy, weil das die einzige Stelle ist, wo wir
-    es brauchen.
+    Simple Levenshtein-1 heuristic for "did you mean …?" hints.
+    ``difflib`` is imported lazily since this is the only place it's used.
     """
     if not s:
         return None
@@ -894,10 +821,9 @@ def _closest_match(s: str, candidates: set[str]) -> str | None:
 
 
 def _line_number_at(content: str, char_index: int) -> int:
-    """1-basierter Zeilen-Index für eine Char-Position. Wir benutzen
-    das, um in MarkerError-Messages auf die Zeile in ``variables.tf``
-    zu zeigen, statt nur den Variablennamen zu nennen — Apps mit 30+
-    Variablen sind sonst grep-Arbeit für den Autor."""
+    """1-based line index for a char position. Used to point
+    MarkerError messages at the line in ``variables.tf`` instead of only
+    naming the variable."""
     return content.count("\n", 0, char_index) + 1
 
 
@@ -971,15 +897,14 @@ def _validate_scoped_var_shape(var_name: str, var_type: str, scope: str) -> None
 
 
 def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
-    """Bug #7 — HCL-Default-Literale in das passende Python-Pendant
-    überführen, damit das Frontend ``default = 2`` als ``2`` (Zahl)
-    sieht statt als ``"2"`` (String). Liefert ``(value, required)`` —
-    bei einem HCL-``null``-Default ist der Wert ``None`` UND
-    ``required = True``, weil Terraform null als „kein Default" wertet.
+    """Coerce an HCL default literal into its Python equivalent so the
+    frontend sees ``default = 2`` as ``2`` (number) rather than ``"2"``
+    (string). Returns ``(value, required)`` — an HCL ``null`` default
+    yields ``None`` AND ``required = True`` (Terraform treats null as "no
+    default").
 
-    Robust gegenüber Mini-Whitespace und Trailing-Kommata; bei jedem
-    Parse-Fehler fallen wir auf den rohen String zurück (lieber ein
-    String im Frontend als ein 500er-Endpoint).
+    Robust against minor whitespace and trailing commas; any parse error
+    falls back to the raw string.
     """
     if raw_default is None:
         return (None, True)
@@ -994,8 +919,8 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
 
     type_lower = (var_type or "").strip().lower()
 
-    # Bool zuerst, weil ``"true"`` als String-Default sonst durch den
-    # Stringpfad gefangen wird.
+    # Bool first, otherwise ``"true"`` as a string default is caught by
+    # the string path.
     if type_lower == "bool":
         if stripped.lower() == "true":
             return (True, False)
@@ -1025,11 +950,10 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
         try:
             return (json.loads(stripped), False)
         except (ValueError, TypeError):
-            # Fallback: HCL erlaubt unquoted Identifier als String
-            # (``["NAT"]`` ist häufig, aber auch ``[NAT]``) und
-            # ``true``/``false``/``null`` als Werte. Wir versuchen
-            # einen behutsamen Pre-Tokenize-Schritt; bei weiterem
-            # Fehlschlag fällt der String unverändert durch.
+            # Fallback: HCL allows unquoted identifiers as strings
+            # (``[NAT]``) and ``true``/``false``/``null`` as values. Try
+            # a gentle pre-tokenize step; on further failure the string
+            # passes through unchanged.
             try:
                 normalised = re.sub(
                     r"\b(true|false|null)\b",
@@ -1041,8 +965,7 @@ def _coerce_hcl_default(raw_default: str, var_type: str) -> tuple[Any, bool]:
             except (ValueError, TypeError):
                 return (stripped, False)
 
-    # String (oder unbekannter Type): äußere Quotes abstreifen, falls
-    # der Caller das nicht schon getan hat.
+    # String (or unknown type): strip outer quotes if the caller hasn't.
     if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in ('"', "'"):
         return (stripped[1:-1], False)
     return (stripped, False)
@@ -1058,14 +981,12 @@ def _parse_one_variable(
     source: str,
 ) -> dict[str, Any]:
     """
-    Verarbeitet einen einzelnen ``variable "..." { ... }``-Block.
+    Process a single ``variable "..." { ... }`` block.
 
-    Liefert das Variable-Dict immer; etwaige Marker-Fehler werden NICHT
-    geworfen, sondern im Feld ``markerError`` an die Variable angehängt.
-    Damit kann das Frontend die Variable als Free-Text rendern und den
-    Fehler inline zeigen — die App bleibt benutzbar, der Autor sieht
-    den Fehler aber sofort. Globaler 400-Abbruch wäre die schlechte
-    Variante (1 schlechter Marker → ganzer Wizard kaputt).
+    Always returns the variable dict; marker errors are NOT raised but
+    attached to the variable in the ``markerError`` field, so the frontend
+    can render the variable as free text and show the error inline instead
+    of breaking the whole wizard on one bad marker.
     """
     # Extract type
     type_match = re.search(r'type\s*=\s*([^\n]+)', var_block)
@@ -1079,17 +1000,15 @@ def _parse_one_variable(
     default_match = re.search(r'default\s*=\s*([^\n]+)', var_block)
     default_raw = default_match.group(1).strip() if default_match else None
 
-    # Bug #7 — HCL-Defaults nicht als rohe Strings durchreichen, sondern
-    # in das passende Python-Pendant coercen (number→int/float, bool→
-    # bool, list/map→Python-Listen/-Dicts). ``null`` setzt ``required``
-    # zurück auf True. Bei Parse-Fehler fällt der Wert auf den
-    # ursprünglichen String zurück.
+    # Coerce HCL defaults into their Python equivalents (number→int/float,
+    # bool→bool, list/map→lists/dicts). ``null`` resets ``required`` to
+    # True. On parse error the value falls back to the raw string.
     try:
         default_value, required = _coerce_hcl_default(default_raw, var_type)
     except Exception:
-        # Defensiv: kein einziger HCL-Edge-Case sollte den Wizard
-        # crashen. Im Worst-Case bleibt das alte Verhalten erhalten —
-        # roher String, required=False wenn ein Default da war.
+        # Defensive: no HCL edge case should crash the wizard. Worst
+        # case, keep the raw string with required=False if a default was
+        # present.
         default_value = default_raw
         required = default_raw is None
 
@@ -1102,9 +1021,9 @@ def _parse_one_variable(
         "source": source,
     }
 
-    # @openstack-Marker auswerten. Per-Variable-Try/Except: ein Tippfehler
-    # in EINER Variablen-Description darf nicht den gesamten Wizard
-    # blockieren; der Fehler reist im Payload mit der Variablen mit.
+    # Evaluate @openstack markers. Per-variable try/except: a typo in ONE
+    # variable description must not block the whole wizard; the error
+    # travels in the payload alongside the variable.
     try:
         (
             os_type,
@@ -1114,14 +1033,11 @@ def _parse_one_variable(
             var_scope,
             file_exts,
         ) = _parse_marker(var_name, var_type, description, source=source)
-        # File-Variablen haben eine harte Vertragsschnittstelle gegenüber
-        # cloud-init: der Wizard muss wissen, ob er einen Single-Slot
-        # (scope=all), eine Map über Teams oder eine Map über User
-        # rendern soll. Die HCL-Type-Schachtelung muss zum Scope
-        # passen, sonst würde Terraform den Decode beim Apply
-        # zurückweisen — wir fangen das hier ab und geben dem Autor
-        # eine klare Fehlermeldung statt eines stack-traces im
-        # Worker-Log.
+        # File variables have a hard contract with cloud-init: the wizard
+        # must know whether to render a single slot (scope=all), a map
+        # over teams, or a map over users. The HCL type nesting must match
+        # the scope or Terraform rejects the decode at apply — we catch it
+        # here and give the author a clear error.
         if os_type == "file":
             _validate_file_var_shape(var_name, var_type, file_scope or "all")
         elif var_scope:
@@ -1132,20 +1048,18 @@ def _parse_one_variable(
             "variable": exc.var_name,
             "message": exc.message,
             "location": f"{file_label}:{line}",
-            # ``code`` ist der stabile Schlüssel für künftige i18n /
-            # Frontend-Logik. Existierende Clients ignorieren das Feld.
+            # ``code`` is the stable key for future i18n / frontend logic.
             "code": exc.code,
         }
         return var_info
 
     if os_type:
         if os_type == "file":
-            # File-Variablen sind weder mode- noch multi-driven; der
-            # Wizard rendert eine FileDropZone, nicht den Resource-
-            # Picker. ``osMode`` und ``osMulti`` werden bewusst nicht
-            # gesetzt, damit das Frontend eine fehlende Belegung als
-            # „nicht-anwendbar" liest statt einen Default-Wert zu
-            # erfinden.
+            # File variables are neither mode- nor multi-driven; the
+            # wizard renders a FileDropZone, not the resource picker.
+            # ``osMode`` and ``osMulti`` are deliberately left unset so
+            # the frontend reads the absence as "not applicable" rather
+            # than inventing a default.
             var_info["osType"] = os_type
             var_info["osScope"] = file_scope or "all"
             if file_exts:
@@ -1156,11 +1070,9 @@ def _parse_one_variable(
             var_info["osMode"] = mode
             var_info["osMulti"] = multi
 
-    # ``varScope`` ist orthogonal zum Resource-Type — auch eine
-    # Free-Text-Variable (kein ``osType``) kann scoped sein.
-    # Für File-Variablen spiegeln wir den ``osScope`` zusätzlich in
-    # ``varScope``, damit das Frontend für Slot-Berechnung nur EINE
-    # Quelle lesen muss.
+    # ``varScope`` is orthogonal to the resource type — even a free-text
+    # variable (no ``osType``) can be scoped. For file variables we mirror
+    # ``osScope`` into ``varScope`` so the frontend reads one source.
     if var_scope:
         var_info["varScope"] = var_scope
     elif os_type == "file":
@@ -1174,22 +1086,15 @@ def _iter_variable_blocks(content: str):
     ``variable "name" { ... }`` block, brace-balanced.
 
     A naive ``variable\\s+"([^"]+)"\\s*\\{([^}]+)\\}`` regex stops the
-    block at the FIRST ``}`` and therefore truncates any variable whose
-    type or default literal contains braces — e.g. ``type =
-    object({...})``, ``map(...)`` or ``default = {}``. That corrupted
-    the parsed default (``default = {}`` was captured as the string
-    ``"{"``), which broke the default-baseline the wizard compares
-    against for scoped/map variables such as ``team_flavor_ids``.
+    block at the FIRST ``}`` and truncates any variable whose type or
+    default literal contains braces — e.g. ``type = object({...})``,
+    ``map(...)`` or ``default = {}``. Instead we match only the block
+    HEAD and then walk the string counting ``{``/``}`` until depth
+    returns to zero.
 
-    We match only the block HEAD with a regex and then walk the string
-    counting ``{``/``}`` until depth returns to zero — the same
-    brace-balancing approach already used in ``_parse_marker``.
-
-    ``var_block`` is the content BETWEEN the outer braces (exclusive),
-    matching what the old ``match.group(2)`` returned so downstream
-    parsing (``_parse_one_variable``) is unchanged. ``block_offset`` is
-    the start index of the whole ``variable`` declaration, as the old
-    ``match.start()`` provided (used for line-number hints).
+    ``var_block`` is the content BETWEEN the outer braces (exclusive);
+    ``block_offset`` is the start index of the whole ``variable``
+    declaration (used for line-number hints).
     """
     head_pattern = r'variable\s+"([^"]+)"\s*\{'
     for head in re.finditer(head_pattern, content):
@@ -1216,15 +1121,15 @@ def _iter_variable_blocks(content: str):
 
 
 def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
-    """Parse Terraform `variables.tf` file. Marker-Fehler einzelner
-    Variablen werden im Variable-Payload als ``markerError`` mitgesendet
-    (nicht geworfen) — siehe ``_parse_one_variable``."""
+    """Parse Terraform `variables.tf` file. Per-variable marker errors
+    travel in the ``markerError`` field (not raised) — see
+    ``_parse_one_variable``."""
     with open(file_path) as f:
         content = f.read()
 
     variables = []
     for var_name, var_block, block_offset in _iter_variable_blocks(content):
-        # Filter: users und image_name rauslassen
+        # Filter: drop ``users`` and ``image_name``
         if var_name == "users" or var_name == "image_name":
             continue
         # Multi-image apps declare ``image_name_<key>`` per template and
@@ -1250,13 +1155,13 @@ def _parse_terraform_variables(file_path: str) -> list[dict[str, Any]]:
 
 
 def _parse_packer_variables(file_path: str, template_key: str = "default") -> list[dict[str, Any]]:
-    """Parse Packer `variables.pkr.hcl` file. Marker-Fehler reisen pro
-    Variable im ``markerError``-Feld mit; siehe ``_parse_one_variable``.
+    """Parse Packer `variables.pkr.hcl` file. Per-variable marker errors
+    travel in the ``markerError`` field; see ``_parse_one_variable``.
 
     ``template_key`` is recorded on each variable so the wizard can
     group Packer variables per template (and avoid name collisions
-    across templates in multi-image apps). For the legacy single-
-    template layout the caller passes ``"default"``.
+    across templates in multi-image apps). For the single-template
+    layout the caller passes ``"default"``.
     """
     with open(file_path) as f:
         content = f.read()
@@ -1416,12 +1321,9 @@ def list_apps(
 ):
     """List apps visible to the current user.
 
-    Phase 2 — Bug #6 fix:
-      * Admins see every non-deleted app (full platform view).
-      * Everyone else, including teachers, sees the student-style
-        filter: own apps + public apps with at least one approved
-        version. Teachers no longer get a plattform-wide blanket
-        view here; if they need it, they need the admin role.
+    Admins see every non-deleted app (full platform view). Everyone else,
+    including teachers, sees the student-style filter: own apps + public
+    apps with at least one approved version.
     """
     if current_user.role == UserRole.ADMIN:
         apps = crud_apps.get_apps(db, skip=skip, limit=limit)
@@ -1453,11 +1355,9 @@ def get_app(
             detail="App not found"
         )
 
-    # Phase 2 — Bug #2 fix: teacher loses the blanket access on
-    # foreign apps. Only owner OR admin sees private/unapproved apps;
-    # everyone else (incl. teachers) needs the app to be public AND
-    # have an approved version. Same gate everywhere via
-    # :func:`can_view_app`.
+    # Only owner OR admin sees private/unapproved apps; everyone else
+    # (incl. teachers) needs the app to be public AND have an approved
+    # version. Same gate everywhere via :func:`can_view_app`.
     is_owner_or_admin = (
         str(app.userId) == str(current_user.userId)
         or current_user.role == UserRole.ADMIN
@@ -1592,20 +1492,18 @@ def get_app_variables(
             detail="App not found"
         )
 
-    # Check access permission. Phase 2: ``ensure_view_app`` enforces
-    # the new matrix — owner OR admin sees private/unapproved, others
-    # need the public+approved combination.
+    # Check access permission. ``ensure_view_app`` enforces the matrix:
+    # owner OR admin sees private/unapproved, others need the
+    # public+approved combination.
     ensure_view_app(current_user, app, db=db)
 
     variables = load_variable_definitions(app, version)
     if not variables:
         logger.warning("No variables found for app %s version %s", app_id, version)
 
-    # Marker-Fehler reisen pro Variable im ``markerError``-Feld mit
-    # — der Endpoint wirft kein 400 mehr für einzelne Marker-Bugs,
-    # sondern überlässt dem Frontend die Anzeige inline. Ein bug-
-    # behaftetes Marker → eine Variable als Free-Text + Inline-Hint;
-    # alle anderen Variablen bleiben benutzbar.
+    # Marker errors travel per-variable in the ``markerError`` field; the
+    # endpoint does not 400 on a single bad marker but leaves the frontend
+    # to show it inline, keeping the other variables usable.
     bad = [v for v in variables if v.get("markerError")]
     if bad:
         logger.warning(
@@ -1678,8 +1576,7 @@ def update_app(
     ``git_link`` is immutable after creation — sending it in the body
     returns HTTP 400. Use ``is_private`` to toggle visibility.
 
-    Phase 2 — Bug #2 fix: owner OR admin only. Teachers no longer have
-    a blanket edit on foreign apps.
+    Owner OR admin only.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
@@ -1719,10 +1616,8 @@ def submit_version(
 ):
     """Submit a specific version tag for admin review.
 
-    Phase 2 — Bug #2 fix: only the app owner OR admin can submit
-    versions. Teachers no longer get a blanket submit right on foreign
-    apps. A REJECTED version can be resubmitted; PENDING and APPROVED
-    cannot.
+    Owner OR admin only. A REJECTED version can be resubmitted; PENDING
+    and APPROVED cannot.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
@@ -1736,9 +1631,9 @@ def submit_version(
             detail="App has no git repository configured",
         )
 
-    # Marker-Validierung — blockt Submit bei fehlerhaften @openstack-Markern.
-    # Identische Logik wie beim Approve-Endpoint; git-Fehler (400/500) werden
-    # still übergangen, damit Submit auch bei nicht erreichbarem Repo klappt.
+    # Marker validation — blocks submit on invalid @openstack markers.
+    # Same logic as the approve endpoint; git errors (400/500) are
+    # skipped so submit still works when the repo is unreachable.
     try:
         variables = load_variable_definitions(app, version_tag)
         marker_errors = [v.get("markerError") for v in variables if v.get("markerError")]
@@ -1756,8 +1651,8 @@ def submit_version(
     except HTTPException as exc:
         if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
             raise
-        # 400 (kein git_link bereits oben behandelt) oder 500 (Git nicht
-        # erreichbar) — Submit trotzdem erlauben.
+        # 400 (no git_link, handled above) or 500 (git unreachable) —
+        # allow submit anyway.
 
     return crud_approvals.submit_version(
         db, app_id=app_id, version_tag=version_tag, diff_url=body.diff_url, notes=body.notes
@@ -1779,8 +1674,8 @@ def withdraw_version(
 ):
     """Withdraw a PENDING version submission.
 
-    Phase 2 — Bug #2 fix: only owner OR admin may withdraw. Deletes
-    the approval entry so the version appears as unsubmitted again.
+    Owner OR admin only. Deletes the approval entry so the version
+    appears as unsubmitted again.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:
@@ -1805,8 +1700,7 @@ def list_version_approvals(
 ):
     """List all version approval entries for an app.
 
-    Phase 2 — Bug #2 fix: only owner OR admin sees this list.
-    Teachers no longer have a blanket view on foreign apps.
+    Owner OR admin only.
     """
     app = crud_apps.get_app(db, app_id, include_deleted=True)
     if not app:
@@ -1829,15 +1723,11 @@ def delete_app(
     """Soft-delete an app.
 
     Sets ``apps.deleted_at`` instead of removing the row, so any
-    historical *or* still-running deployment that points at this app
-    keeps resolving (the detail page can still render the app name,
-    the running terraform state stays operational). The app simply
-    stops appearing in listings and the deploy wizard, so no new
-    deploys can be started against it. Existing deployments live on
-    until the user destroys them individually.
+    historical or still-running deployment that points at this app keeps
+    resolving. The app stops appearing in listings and the deploy wizard;
+    existing deployments live on until destroyed individually.
 
-    Phase 2 — Bug #2 fix: owner OR admin only. Teachers no longer
-    have a blanket delete on foreign apps.
+    Owner OR admin only.
     """
     app = crud_apps.get_app(db, app_id)
     if not app:

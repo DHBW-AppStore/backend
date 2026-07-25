@@ -1,24 +1,15 @@
-"""
-Shared OpenStack-Client-Layer für FastAPI-Endpoints.
+"""Shared OpenStack client layer for FastAPI endpoints.
 
-Drei Aufgaben:
+Three responsibilities:
 
-1. Auth-Kwargs aus den verschlüsselten User-Credentials bauen — exakt der
-   gleiche Code, der vorher dupliziert in ``quotas.py`` und
-   ``openstack_validator.py`` lebte. Eine Quelle der Wahrheit.
-
-2. Eine Verbindung pro Request öffnen. ``openstack.connect`` cached intern
-   nichts, was wir bräuchten — aber ein Token-Roundtrip dauert leicht
-   1–2 s. Wir reichen die Connection als Context-Manager nach außen, damit
-   Endpoints sie sauber schließen.
-
-3. Ein **prozesslokaler TTL-Cache** für Listen-Antworten.
-   Hintergrund: Der Wizard schickt potentiell 5–10 GETs in schneller Folge
-   (User klickt Picker auf, Variable für Variable). Ohne Cache feuern wir
-   pro Klick einen Keystone-Token-Refresh + den eigentlichen Listen-Call.
-   60-Sekunden-Cache reicht — der User wird in der Zeit kein neues Netzwerk
-   anlegen, und wenn doch, gibt es einen Refresh-Knopf im Frontend, der
-   ``invalidate_user`` triggert.
+1. Build auth kwargs from the encrypted user credentials (single
+   source of truth).
+2. Open one connection per request, exposed as a context manager so
+   endpoints can close it cleanly.
+3. A process-local TTL cache for list responses: the wizard fires
+   several GETs in quick succession, and a 60s cache avoids a Keystone
+   token refresh per click. A frontend refresh button triggers
+   ``invalidate_user``.
 """
 
 from __future__ import annotations
@@ -45,10 +36,9 @@ logger = logging.getLogger(__name__)
 # Connection-Bau
 # ----------------------------------------------------------------
 def _build_connect_kwargs(creds: dict) -> dict:
-    """
-    Baut den Kwargs-Dict für ``openstack.connect`` aus den dekrypteten
-    User-Credentials. Zwei Auth-Typen werden unterstützt:
-    Password und Application-Credential (v3applicationcredential).
+    """Build the kwargs dict for ``openstack.connect`` from decrypted
+    user credentials. Supports password and application-credential
+    (v3applicationcredential) auth.
     """
     base = {
         "auth_url": creds["auth_url"],
@@ -82,12 +72,11 @@ def _build_connect_kwargs(creds: dict) -> dict:
 
 @contextmanager
 def user_connection(db: Session, user: User) -> Iterator[Any]:
-    """
-    Yieldet eine ``openstack.Connection`` für den User.
+    """Yield an ``openstack.Connection`` for the user.
 
-    - 412, falls keine Credentials hinterlegt sind (Frontend zeigt CTA-Banner)
-    - 502 (Bad Gateway) für transienten OpenStack-Fehler beim Connect —
-      wir wollen 500er als „Backend-Bug" reservieren.
+    - 412 if no credentials are stored (frontend shows a CTA banner)
+    - 502 for a transient OpenStack error on connect (500s are reserved
+      for backend bugs)
     """
     try:
         creds = crud_creds.get_decrypted_for_backend(db, user.userId)
@@ -103,7 +92,7 @@ def user_connection(db: Session, user: User) -> Iterator[Any]:
         yield conn
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 — SDK wirft eine Vielzahl
+    except Exception as exc:  # noqa: BLE001 — SDK raises many types
         logger.warning(
             "OpenStack connect failed for user %s: %s", user.userId, exc
         )
@@ -112,9 +101,7 @@ def user_connection(db: Session, user: User) -> Iterator[Any]:
             detail={"reason": "openstack_unavailable", "message": str(exc)},
         )
     finally:
-        # ``openstack.Connection`` hat ``close``, aber das Idiom in der
-        # SDK ist „lass laufen, GC räumt auf". Wir versuchen es trotzdem
-        # höflich, ignorieren Fehler.
+        # Close politely; the SDK tolerates leaving it to GC. Ignore errors.
         if conn is not None:
             with suppress(Exception):
                 conn.close()
@@ -123,7 +110,7 @@ def user_connection(db: Session, user: User) -> Iterator[Any]:
 # ----------------------------------------------------------------
 # TTL-Cache für Resource-Listen
 # ----------------------------------------------------------------
-# Key = (user_id, resource_kind, frozenset von Filter-Items)
+# Key = (user_id, resource_kind, frozenset of filter items)
 # Value = (expiry_epoch, data)
 _CacheKey = tuple[str, str, frozenset]
 _cache: dict[_CacheKey, tuple[float, list[dict]]] = {}
@@ -142,15 +129,10 @@ def cached_list(
     filters: dict | None,
     fetch: Callable[[], list[dict]],
 ) -> list[dict]:
-    """
-    TTL-Cache-Wrapper. ``fetch`` wird nur aufgerufen, wenn kein gültiger
-    Eintrag existiert. Locking sorgt dafür, dass parallel laufende
-    Requests denselben Key nur einmal fetchen — die anderen warten und
-    bekommen das Ergebnis.
-
-    Cache ist prozesslokal und in-memory. Bei mehreren Backend-Instanzen
-    laufen mehrere Caches parallel — das ist okay, weil die Daten
-    eh nur 60 s alt sein dürfen und wir keinen Konsistenz-Anspruch haben.
+    """TTL-cache wrapper. ``fetch`` is called only when no valid entry
+    exists. The cache is process-local and in-memory; multiple backend
+    instances run independent caches, which is fine since the data is
+    allowed to be up to 60s stale.
     """
     key = _make_key(user_id, kind, filters)
     now = time.monotonic()
@@ -160,9 +142,8 @@ def cached_list(
         if cached and cached[0] > now:
             return cached[1]
 
-    # Race-Window: zwei Requests können gleichzeitig hier landen und
-    # beide ``fetch`` aufrufen. Das ist ineffizient, aber nicht falsch —
-    # und einfacher als ein Per-Key-Lock-Map.
+    # Two concurrent requests may both fetch here; inefficient but not
+    # incorrect, and simpler than a per-key lock map.
     data = fetch()
 
     with _cache_lock:
@@ -172,12 +153,9 @@ def cached_list(
 
 
 def invalidate_user(user_id: UUID, kind: str | None = None) -> int:
-    """
-    Cache für einen User invalidieren. Wird vom Refresh-Knopf im
-    Frontend getriggert. Ohne ``kind`` werden alle Resource-Typen des
-    Users entfernt.
-
-    Returns die Anzahl der entfernten Einträge (für Logs).
+    """Invalidate the cache for one user (triggered by the frontend
+    refresh button). Without ``kind`` all resource types for the user
+    are removed. Returns the number of removed entries.
     """
     user_str = str(user_id)
     removed = 0

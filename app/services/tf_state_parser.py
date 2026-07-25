@@ -8,24 +8,20 @@ join with live OpenStack data.
 
 Design choices:
 
-* **Whitelist of resource types**, not a free-form pass-through. The
-  state file contains random_password / data sources / Terraform-
-  internal resources we don't want to surface in the UI. We filter to
-  the OpenStack resource kinds that map onto a meaningful UI card.
+* Whitelist of resource types, not free-form pass-through: the state
+  file contains random_password / data sources / Terraform-internal
+  resources we don't surface. We filter to OpenStack kinds that map
+  onto a meaningful UI card.
 
-* **Address strings match ``terraform state list``** exactly — both
-  for ``count.index`` and ``for_each`` instances. This is the same
-  string the user passes to ``terraform apply -target=...`` /
-  ``-replace=...``, so we can use it round-trip without translation.
+* Address strings match ``terraform state list`` exactly (for both
+  ``count.index`` and ``for_each``), so they round-trip as
+  ``-target=`` / ``-replace=`` arguments without translation.
 
-* **Team-Tag extraction**: pulls ``metadata.team`` from
-  Compute-Instance attributes. Apps that don't set the tag get
-  ``team=None`` — the UI then renders the resource as ``Shared``.
-  See the team-contract documentation in
-  ``docs/app-author-guide.md`` for the contract this implements.
+* Team-Tag extraction: pulls ``metadata.team`` from Compute-Instance
+  attributes; resources without the tag get ``team=None`` and render
+  as ``Shared``.
 
-The parser is a pure function — no DB, no HTTP, no SDK calls. The
-live-OpenStack join lives in ``deployment_status.py``.
+The parser is a pure function — no DB, no HTTP, no SDK calls.
 """
 
 from __future__ import annotations
@@ -161,11 +157,9 @@ def _build_entry(
 ) -> TfResource | None:
     """Materialise one resource INSTANCE into a ``TfResource``.
 
-    Returns None when the instance has no provider-side ID — that
-    means Terraform created the row but the apply failed before
-    OpenStack persisted the resource. We could surface it, but the
-    redeploy target wouldn't work without an ID, so we drop it; the
-    user's recourse is a full re-apply.
+    Returns None when the instance has no provider-side ID (apply
+    failed before OpenStack persisted the resource); a redeploy target
+    without an ID wouldn't work, so it is dropped.
     """
     attrs = instance.get("attributes") or {}
     provider_id = attrs.get("id")
@@ -202,10 +196,9 @@ def _format_address(
       * ``for_each`` (string index_key)  → ``type.name["Team-A"]``
 
     The double-quotes around for_each keys MUST be present — they're
-    part of the terraform CLI contract for ``-target=`` and
-    ``-replace=`` arguments. We preserve them verbatim in the JSON
-    response; the frontend URL-encodes them before issuing the
-    redeploy call, and FastAPI's path decoding restores them.
+    part of the terraform CLI contract for ``-target=`` / ``-replace=``.
+    The frontend URL-encodes them before the redeploy call and FastAPI
+    restores them.
     """
     base = f"{resource_type}.{resource_name}"
     index_key = instance.get("index_key")
@@ -248,17 +241,10 @@ def _pick_display_name(
 def _extract_team(category: ResourceCategory, attrs: dict) -> str | None:
     """Pull ``metadata.team`` from a compute-instance, else None.
 
-    OpenStack's ``metadata`` is a flat string→string map. Apps follow
-    the team-contract by setting ``metadata = { team = each.key }``
-    on team-scoped instances. We don't try to infer the team from the
-    address (e.g. by parsing the for_each key) — too magical, would
-    break for apps that use a different naming convention. Either the
-    tag is set or the resource shows up as "Shared".
-
-    Only Compute-Instances carry the contract today; Networks/SGs are
-    typically shared infrastructure across teams. Extending the
-    contract to other resource kinds would just mean adding them to
-    this dispatch.
+    Apps follow the team-contract by setting
+    ``metadata = { team = each.key }`` on team-scoped instances. The
+    team is not inferred from the address. Only Compute-Instances carry
+    the contract; other kinds are treated as shared.
     """
     if category != "instance":
         return None

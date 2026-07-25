@@ -93,21 +93,16 @@ def create_course(
     Create a new course
     - **Requires**: TEACHER or ADMIN role
 
-    Phase 3: the creating teacher is automatically registered as a
-    course-teacher of the new course via the ``course_teachers`` join
-    table. This is what makes the subsequent edit/delete gate pass
-    for them on the freshly created row without an extra round trip.
-    Admins who create a course are NOT auto-added — admin rights
-    already cover edit/delete, and adding them as course-teacher
-    would muddy the "course-teacher" semantic with admin presence.
-    The admin can opt-in via ``POST /courses/{id}/teachers/{user_id}``
-    if they want their name visible on the course roster.
+    A creating teacher is automatically registered as a course-teacher of
+    the new course via the ``course_teachers`` join table, so the
+    edit/delete gate passes for them without an extra round trip. Admins
+    are NOT auto-added (admin rights already cover edit/delete); they can
+    opt in via ``POST /courses/{id}/teachers/{user_id}``.
     """
     db_course = crud_courses.create_course(db, course)
 
-    # Phase 3 — auto-register the creating teacher as course-teacher.
-    # Skipped for admins because admin rights are role-shaped, not
-    # course-scoped.
+    # Auto-register the creating teacher as course-teacher. Skipped for
+    # admins because admin rights are role-shaped, not course-scoped.
     if current_user.role == UserRole.TEACHER:
         db.add(
             CourseTeacher(
@@ -134,12 +129,10 @@ def update_course(
     """
     Update a course
 
-    Phase 3: only a designated course-teacher of THIS course (row in
-    ``course_teachers``) or an admin may edit. A teacher who is not a
-    course-teacher of the course gets 403 with the structured
-    ``course_edit_forbidden`` payload. 404 takes precedence over 403
-    for nonexistent courses to keep the existence-disclosure surface
-    aligned with the rest of the API.
+    Only a designated course-teacher of THIS course (row in
+    ``course_teachers``) or an admin may edit; others get 403 with the
+    structured ``course_edit_forbidden`` payload. 404 takes precedence
+    over 403 for nonexistent courses.
     """
     course = crud_courses.get_course(db, course_id)
     if not course:
@@ -172,11 +165,10 @@ def delete_course(
     """
     Delete a course
 
-    Phase 3: only a designated course-teacher of THIS course or an
-    admin may delete. Members of the course are detached
-    (``users.courseId = NULL``) before the row goes away — no user
-    account is destroyed; ``course_teachers`` rows for the course
-    cascade away via the ON DELETE CASCADE on the join table.
+    Only a designated course-teacher of THIS course or an admin may
+    delete. Members are detached (``users.courseId = NULL``) before the
+    row goes away — no user account is destroyed; ``course_teachers``
+    rows cascade away via ON DELETE CASCADE.
     """
     course = crud_courses.get_course(db, course_id)
     if not course:
@@ -287,14 +279,8 @@ def remove_course_member(
 # ----------------------------------------------------------------
 # The ``course_teachers`` join table is the source of truth for the
 # course-teacher capability. ``POST /courses`` auto-registers the
-# creating teacher; everything beyond that — adding a second teacher,
-# revoking a teacher, swapping the roster around — is admin-only.
-#
-# Why admin-only: course-teachers already have edit/delete on their
-# own course, so letting them mutate the roster would let one teacher
-# kick another out at will. That can be relaxed later (e.g. "any
-# course-teacher of the course may add another teacher to it") but
-# we keep it locked to admin until there's a concrete need.
+# creating teacher; all other roster mutations are admin-only so one
+# course-teacher cannot remove another.
 
 
 @router.post(

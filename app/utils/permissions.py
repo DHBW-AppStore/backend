@@ -1,22 +1,11 @@
 """
 Permission and authorization utilities for role-based access control.
 
-The module is built around two ideas:
-
-* a ``require_roles()`` FastAPI-dependency factory that produces a
-  callable enforcing one or more :class:`UserRole` values, and
-* two role tuples (``ADMIN_ROLES`` and ``STAFF_ROLES``) that name the
-  two common groupings used across the app.
-
-The historical helpers (``get_current_admin``, ``get_current_teacher_or_admin``,
-``get_current_student``) remain as thin aliases that delegate to
-``require_roles()`` so existing routers keep working. Fine-grained,
-resource-level decisions live in :mod:`app.utils.capabilities`; new
-routers should prefer ``require_admin`` / ``require_staff`` or a
-capability check over the legacy aliases.
+Provides a ``require_roles()`` FastAPI-dependency factory and the
+``ADMIN_ROLES`` / ``STAFF_ROLES`` groupings. Fine-grained,
+resource-level decisions live in :mod:`app.utils.capabilities`.
 """
 from collections.abc import Callable
-from functools import wraps
 
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -34,11 +23,10 @@ from app.utils.keycloak_auth import get_current_user_keycloak as get_current_use
 # ----------------------------------------------------------------
 # ROLE GROUPINGS
 # ----------------------------------------------------------------
-# ``STAFF_ROLES`` covers everyone with elevated privileges in the
-# product vocabulary — that's the set of users for whom the UI shows
-# the staff-only chrome (admin app review, course management, …). It
-# explicitly does NOT mean "anyone with course-teacher rights" — that
-# is a per-resource check handled in :mod:`app.utils.capabilities`.
+# ``STAFF_ROLES`` covers everyone with elevated privileges (the users
+# for whom the UI shows staff-only chrome). It does NOT mean "anyone
+# with course-teacher rights" — that is a per-resource check handled
+# in :mod:`app.utils.capabilities`.
 STAFF_ROLES: tuple[UserRole, ...] = (UserRole.TEACHER, UserRole.ADMIN)
 ADMIN_ROLES: tuple[UserRole, ...] = (UserRole.ADMIN,)
 
@@ -62,15 +50,6 @@ def require_roles(*roles: UserRole) -> Callable[..., User]:
 
     so the frontend can render a precise "you need role X" message and
     distinguish role-based 403s from resource-based 403s.
-
-    Usage::
-
-        @router.get("/admin-only", dependencies=[Depends(require_admin)])
-        def admin_only(): ...
-
-        @router.get("/staff-only")
-        def staff_only(user: User = Depends(require_staff)):
-            ...
     """
     if not roles:
         raise ValueError("require_roles() needs at least one role")
@@ -91,125 +70,9 @@ def require_roles(*roles: UserRole) -> Callable[..., User]:
     return _dep
 
 
-# Aliases used directly on router dependencies. These are the new
-# canonical way to require a role — prefer them over the historical
-# `get_current_*` helpers below.
+# Canonical aliases for requiring a role on router dependencies.
 require_admin = require_roles(UserRole.ADMIN)
 require_staff = require_roles(UserRole.TEACHER, UserRole.ADMIN)
-
-
-# ----------------------------------------------------------------
-# LEGACY ROLE HELPERS  (kept as thin aliases)
-# ----------------------------------------------------------------
-# These names are still imported across the codebase. We keep the same
-# names and call signatures and delegate to ``require_roles()`` so
-# existing routers keep working; new code should prefer
-# ``require_admin`` / ``require_staff`` directly.
-def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Require ADMIN role.
-
-    Thin alias around ``require_admin``. Raises 403 with the structured
-    ``role_required`` payload — same status, slightly richer body.
-    """
-    if current_user.role != UserRole.ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "role_required",
-                "required": [UserRole.ADMIN.value],
-            },
-        )
-    return current_user
-
-
-def get_current_teacher_or_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Require TEACHER or ADMIN role.
-
-    Thin alias around ``require_staff``.
-    """
-    if current_user.role not in STAFF_ROLES:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "role_required",
-                "required": [r.value for r in STAFF_ROLES],
-            },
-        )
-    return current_user
-
-
-def get_current_student(current_user: User = Depends(get_current_user)) -> User:
-    """Require STUDENT role."""
-    if current_user.role != UserRole.STUDENT:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "role_required",
-                "required": [UserRole.STUDENT.value],
-            },
-        )
-    return current_user
-
-
-def require_role(allowed_roles: list[UserRole]) -> Callable:
-    """Legacy decorator. Kept for backwards compatibility.
-
-    Prefer ``Depends(require_roles(...))`` on the route signature —
-    decorators on FastAPI routes are fragile because they bypass the
-    dependency injection system. This is only here so callers that
-    still use ``@require_role([...])`` keep working.
-    """
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            current_user = kwargs.get('current_user')
-            if not current_user:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Not authenticated"
-                )
-
-            if current_user.role not in allowed_roles:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "code": "role_required",
-                        "required": [r.value for r in allowed_roles],
-                    },
-                )
-
-            return await func(*args, **kwargs)
-        return wrapper
-    return decorator
-
-
-# ----------------------------------------------------------------
-# COURSE-LEVEL ACCESS (legacy)
-# ----------------------------------------------------------------
-# Note: ``check_resource_ownership`` and ``ensure_resource_access`` have
-# been removed. They were the origin of Bug #2 (teacher bypass on other
-# users' apps). All consumers now use capability functions from
-# ``app.utils.capabilities``.
-
-def check_course_access(course_id: str, current_user: User) -> bool:
-    """
-    Check if user has access to a course
-    Returns True if user is in the course or is ADMIN
-    """
-    if current_user.role == UserRole.ADMIN:
-        return True
-    return str(current_user.courseId) == str(course_id)
-
-
-def ensure_course_access(course_id: str, current_user: User):
-    """
-    Raise exception if user doesn't have access to course
-    """
-    if not check_course_access(course_id, current_user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have permission to access this course"
-        )
 
 
 # ----------------------------------------------------------------
@@ -274,17 +137,10 @@ def ensure_deployment_access(deployment: Deployment, user: User, db: Session) ->
 def is_deployment_owner_view(deployment: Deployment, user: User) -> bool:
     """True if ``user`` should see the *owner view* of ``deployment``.
 
-    The owner view shows everything: tasks, logs, terraform state,
-    full team rosters, the destroy/delete button. The member view
-    (anything else with deployment access) only shows the deployment
-    metadata, the user's own team, and the resend-credentials button
-    for themself.
-
-    Teachers and admins always see the owner view — they're effectively
-    superusers across deployments. The deployment creator sees the
-    owner view of their own deployment. Everyone else who reaches
-    ``has_deployment_access`` (team members, direct UserToDeployment
-    mappings) gets the member view.
+    The owner view shows everything (tasks, logs, terraform state, full
+    team rosters, destroy/delete); the member view shows only deployment
+    metadata, the user's own team, and resend-credentials for themself.
+    Teachers, admins, and the deployment creator get the owner view.
     """
     if user.role in STAFF_ROLES:
         return True

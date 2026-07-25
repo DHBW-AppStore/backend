@@ -29,24 +29,10 @@ from app.services.reconciler import run_reconciler
 logger = logging.getLogger(__name__)
 
 
-# ``DISABLE_BACKGROUND_TASKS`` is the test-suite escape hatch. The
-# pytest harness spins up the full ``app`` object **per** ``TestClient``
-# context (we have ``client`` / ``admin_client`` / ``student_client``
-# / ``unauth_client`` fixtures, each entering its own ``with`` block).
-# Each lifespan-startup spawns a Celery event-listener thread that
-# blocks on ``amqp.read_frame()`` and a reconciler asyncio task — both
-# daemons, neither cleaned up between tests. After ~5 tests we'd have
-# 5 listeners holding broker sockets and competing with the test
-# session for the small SQLAlchemy connection pool; the pool would
-# exhaust and the next legit DB query would deadlock. Production
-# starts ``app`` exactly once, so it never sees this stacking.
-#
-# Setting ``DISABLE_BACKGROUND_TASKS=1`` in the test environment
-# short-circuits the lifespan body: the FastAPI app is fully wired,
-# routes are registered, but no Celery / reconciler threads are
-# created. Tests that genuinely need to exercise event-listener
-# behaviour stub it at the unit level (see
-# ``tests/test_celery_infra_translation.py``).
+# ``DISABLE_BACKGROUND_TASKS`` short-circuits the lifespan body so the
+# app is fully wired but the Celery listener and reconciler are not
+# started. Used by the test suite, where per-TestClient lifespans would
+# otherwise stack daemon threads and exhaust the DB connection pool.
 def _background_tasks_disabled() -> bool:
     return os.getenv("DISABLE_BACKGROUND_TASKS", "").lower() in ("1", "true", "yes")
 
@@ -62,9 +48,7 @@ async def lifespan(app: FastAPI):
 
     if _background_tasks_disabled():
         # Test path: keep ``app`` fully functional but skip the Celery
-        # listener + reconciler. Without this, repeated ``TestClient``
-        # constructs in the suite stack up threads that block on
-        # broker reads forever and exhaust the DB connection pool.
+        # listener + reconciler.
         logger.info(
             "DISABLE_BACKGROUND_TASKS set — skipping Celery listener "
             "and reconciler (test mode)"
@@ -145,9 +129,9 @@ app.include_router(teams.router, prefix="/teams", tags=["Teams"])
 app.include_router(quotas.router, prefix="/quotas", tags=["Quotas"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 app.include_router(openstack_credentials.router, tags=["OpenStack Credentials"])
-# Read-API für OpenStack-Resourcen (Networks, Flavors, Images, ...).
-# Wird vom Wizard für Value-Help-Dropdowns genutzt, damit User keine
-# UUIDs aus Horizon abtippen müssen.
+# Read API for OpenStack resources (Networks, Flavors, Images, ...),
+# used by the wizard's value-help dropdowns so users don't have to type
+# UUIDs from Horizon.
 app.include_router(
     openstack_resources.router,
     prefix="/me/openstack/resources",
