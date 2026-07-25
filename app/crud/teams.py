@@ -17,12 +17,7 @@ def get_teams(
     limit: int = 100,
     deployment_id: UUID | None = None
 ) -> list[Team]:
-    """Get teams with optional deployment filter.
-
-    Renamed from ``user_group_id`` after the ``UserGroup`` model was
-    removed in the pre-RBAC refactor — teams now live directly under
-    a deployment.
-    """
+    """Get teams with optional deployment filter."""
     query = db.query(Team)
 
     if deployment_id:
@@ -50,9 +45,8 @@ def _add_team_members(db: Session, team: Team, user_ids: list[UUID]) -> None:
 def create_team(db: Session, team: TeamCreate) -> Team:
     """Create a new team.
 
-    ``Team`` has a NOT NULL ``deploymentId`` FK — the request payload
-    must carry the deployment to attach to. The old ``userGroupId``
-    path is gone (``UserGroup`` no longer exists in the model layer).
+    ``Team`` has a NOT NULL ``deploymentId`` FK, so the request payload
+    must carry the deployment to attach to.
     """
     db_team = Team(
         name=team.name,
@@ -60,8 +54,7 @@ def create_team(db: Session, team: TeamCreate) -> Team:
     )
     db.add(db_team)
     # Commit the team row first so ``teamId`` is populated before staging
-    # memberships. (This keeps the historical two-commit semantics: the
-    # team row is durable independently of the membership insert.)
+    # memberships.
     db.commit()
     db.refresh(db_team)
 

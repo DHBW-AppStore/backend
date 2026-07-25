@@ -5,13 +5,6 @@ questions. Every router endpoint that goes beyond a plain role check
 should reach for a ``can_*`` (boolean) or ``ensure_*`` (raises) helper
 here instead of poking at ``user.role`` directly.
 
-Scope:
-    The gates have moved past the initial behavior-preserving extraction:
-    the teacher bypass on app edit/delete has been removed and
-    course-teacher rights are now scoped through the ``course_teachers``
-    join table (see the ``is_course_teacher*`` and ``can_view_*`` helpers
-    below). Individual functions document the rule they enforce.
-
 Conventions:
     - ``can_<verb>_<resource>(user, ..., *, db=None) -> bool`` answers
       the permission question and never raises.
@@ -50,8 +43,8 @@ def _is_admin(user: User) -> bool:
 def _is_staff(user: User) -> bool:
     """User has a staff role (Teacher or Admin).
 
-    Note: ``staff`` is the role-shaped check. Course-teacher rights
-    are a per-resource concept — for that, use :func:`is_course_teacher`.
+    This is the role-shaped check; for per-resource course-teacher
+    rights use :func:`is_course_teacher`.
     """
     return user.role in STAFF_ROLES
 
@@ -77,12 +70,6 @@ def can_view_app(user: User, app: App, *, db: Session | None = None) -> bool:
       - user owns the app, OR
       - user is admin, OR
       - app is public AND has at least one approved version.
-
-    Phase 2: Bug #2 — the teacher bypass is removed. Teachers no
-    longer see private third-party apps via this gate; they go through
-    the same public+approved path as students for foreign apps. The
-    listing endpoint still surfaces their own apps in full, and admins
-    keep their plattform-wide visibility.
     """
     if _is_owner(user, app.userId):
         return True
@@ -92,8 +79,7 @@ def can_view_app(user: User, app: App, *, db: Session | None = None) -> bool:
         return False
     if db is None:
         # Without a DB handle we can't verify the approved-version
-        # requirement; the safe default is "no". Routers that call
-        # can_view_app on a public app must pass ``db``.
+        # requirement; the safe default is "no".
         return False
     return crud_approvals.has_any_approved_version(db, app.appId)
 
@@ -118,12 +104,7 @@ def ensure_list_all_apps(user: User) -> None:
 
 
 def can_edit_app(user: User, app: App) -> bool:
-    """Whether ``user`` may edit ``app``'s metadata.
-
-    Phase 2: Bug #2 fix — teacher bypass removed. Only the app owner
-    OR an admin may edit. Teachers acting on a foreign app must use
-    the admin path (and need the admin role for that).
-    """
+    """Whether ``user`` may edit ``app``'s metadata. Owner or admin only."""
     return _is_admin(user) or _is_owner(user, app.userId)
 
 
@@ -133,11 +114,7 @@ def ensure_edit_app(user: User, app: App) -> None:
 
 
 def can_delete_app(user: User, app: App) -> bool:
-    """Whether ``user`` may (soft-)delete ``app``.
-
-    Phase 2: Bug #2 fix — same gate as :func:`can_edit_app`. Owner or
-    admin only; no teacher bypass.
-    """
+    """Whether ``user`` may (soft-)delete ``app``. Owner or admin only."""
     return _is_admin(user) or _is_owner(user, app.userId)
 
 
@@ -147,11 +124,7 @@ def ensure_delete_app(user: User, app: App) -> None:
 
 
 def can_submit_app_version(user: User, app: App) -> bool:
-    """Submit a version for approval review.
-
-    Phase 2: tightened to owner-or-admin per the plan. Same gate as
-    edit/delete — submitting a version is an authorial action.
-    """
+    """Submit a version for approval review. Owner or admin only."""
     return _is_admin(user) or _is_owner(user, app.userId)
 
 
@@ -161,11 +134,7 @@ def ensure_submit_app_version(user: User, app: App) -> None:
 
 
 def can_approve_app_version(user: User) -> bool:
-    """Approve / reject / revoke a submitted version.
-
-    Admin only — already the case today via ``get_current_admin`` on
-    the admin_apps router.
-    """
+    """Approve / reject / revoke a submitted version. Admin only."""
     return _is_admin(user)
 
 
@@ -182,8 +151,6 @@ def can_view_deployment_member(user: User, dep: Deployment, db: Session) -> bool
 
     Mirrors :func:`app.utils.permissions.has_deployment_access` —
     owner, staff, team-member, or direct UserToDeployment mapping.
-    The member view shows the deployment metadata + the user's own
-    team + the resend-credentials button for themself, nothing more.
     """
     return has_deployment_access(dep, user, db)
 
@@ -196,35 +163,18 @@ def ensure_view_deployment_member(user: User, dep: Deployment, db: Session) -> N
 def can_view_deployment_owner(user: User, dep: Deployment, db: Session) -> bool:
     """Owner-view access — tasks, logs, terraform state, destroy.
 
-    Phase 3 widens the read-only side of the gate: course-teachers
-    may inspect deployments owned by users in courses they teach
-    (Logs / Infrastructure / TF state). Operate rights are kept
-    separate — see :func:`can_operate_deployment`, which still
-    rejects course-teachers.
-
-    Resolution order (precedence):
-      1. owner of the deployment           → True
-      2. admin                             → True
-      3. course-teacher of the deployment-
-         owner's course                    → True (inspect only)
-      4. (legacy) any other staff bypass   → False after Phase 3
-
-    Step 1+2 are handled by :func:`is_deployment_owner_view`. Step 3
-    needs the deployment owner's course, which we read off the
-    pre-loaded ``dep.user.courseId`` when present. The check is
-    skipped when the owner has no course — a deployment whose
-    creator left their course has no course-scope context, so the
-    course-teacher right doesn't apply.
+    Read access is granted to the deployment owner, admins, and
+    course-teachers of the deployment owner's course (inspect only).
+    Operate rights are separate — see :func:`can_operate_deployment`.
+    The course-teacher check is skipped when the owner has no course.
     """
-    # 1+2: owner / admin paths — unchanged.
     if user.role == UserRole.ADMIN:
         return True
     if str(dep.userId) == str(user.userId):
         return True
 
-    # 3: course-teacher inspect right. Only applies to teachers; for
-    # any other role the role gate inside ``is_course_teacher_id``
-    # returns False without touching the DB.
+    # Course-teacher inspect right applies only to teachers; other
+    # roles are rejected by the role gate in ``is_course_teacher_id``.
     if user.role != UserRole.TEACHER:
         return False
     owner_course_id = getattr(getattr(dep, "user", None), "courseId", None)
@@ -239,14 +189,8 @@ def ensure_view_deployment_owner(user: User, dep: Deployment, db: Session) -> No
 
 
 def can_operate_deployment(user: User, dep: Deployment, db: Session) -> bool:
-    """Pause / Resume / Destroy / Redeploy on a deployment.
-
-    Phase 2: tightened to owner-or-admin per the matrix. Teachers no
-    longer get operate rights via the staff bypass — a course-teacher
-    can inspect a deployment in their course (Phase 3) but cannot
-    pause/destroy it.
-    """
-    del db  # reserved for Phase 3 course-teacher lookups
+    """Pause / Resume / Destroy / Redeploy on a deployment. Owner or admin only."""
+    del db
     return _is_admin(user) or _is_owner(user, dep.userId)
 
 
@@ -263,12 +207,9 @@ def can_resend_access(
 ) -> bool:
     """Resend access credentials for ``target_user_id`` on ``dep``.
 
-    Phase 1: a user may resend credentials to themself on any
-    deployment they can member-view; staff may resend credentials to
-    anyone on a deployment they can owner-view. This mirrors the
-    behavior of the current ``/deployments/{id}/resend-access``
-    endpoint, where the member view shows the resend-self button and
-    the owner view shows resend-for-anyone.
+    A user may resend credentials to themself on any deployment they
+    can member-view; staff may resend credentials to anyone on a
+    deployment they can owner-view.
     """
     if str(target_user_id) == str(user.userId):
         return can_view_deployment_member(user, dep, db)
@@ -291,17 +232,10 @@ def ensure_resend_access(
 def is_course_teacher(user: User, course: Course, db: Session) -> bool:
     """Whether ``user`` is a designated teacher of ``course``.
 
-    Phase 3: the ``course_teachers`` join table is now the source of
-    truth. A user is a course-teacher for ``course`` exactly when:
-
-      * their role is ``TEACHER`` (admins are handled separately by
-        the admin bypass at each call site — they don't need a
-        course-teacher row), AND
-      * a ``(course_id, user_id)`` row exists in ``course_teachers``.
-
-    Students never qualify, even if they were somehow inserted into
-    the join table — the role gate stays primary so a misconfigured
-    backfill can't silently grant a student teacher rights.
+    A user is a course-teacher for ``course`` exactly when their role
+    is ``TEACHER`` and a ``(course_id, user_id)`` row exists in
+    ``course_teachers``. Students never qualify — the role gate stays
+    primary. Admins are handled by the admin bypass at each call site.
     """
     return is_course_teacher_id(user, course.courseId, db)
 
@@ -327,15 +261,10 @@ def is_course_teacher_id(user: User, course_id: UUID, db: Session) -> bool:
 def get_my_course_teacher_ids(user: User, db: Session) -> set[UUID]:
     """Load the set of course IDs ``user`` is a designated teacher of.
 
-    Returns the empty set for non-teacher roles — admins use the
-    admin-bypass instead of materialising every course id, and
-    students cannot become course-teachers. Intended to be called
-    ONCE per request and threaded into list-shaping helpers that
-    would otherwise issue one ``is_course_teacher`` query per row
-    (N+1). For v1 the call sites are few enough that this is mostly
-    used as the data source for the ``?scope=course`` filter on the
-    deployments list; future endpoints that need per-row visibility
-    can reuse it.
+    Returns the empty set for non-teacher roles. Intended to be called
+    once per request and threaded into list-shaping helpers to avoid an
+    ``is_course_teacher`` query per row (N+1); currently the data source
+    for the ``?scope=course`` filter on the deployments list.
     """
     if user.role != UserRole.TEACHER:
         return set()
@@ -362,14 +291,7 @@ def ensure_view_course_detail(user: User) -> None:
 
 
 def can_edit_course(user: User, course: Course, db: Session) -> bool:
-    """Edit / delete ``course``.
-
-    Phase 3: narrowed to "course-teacher of THIS course OR admin".
-    A teacher who is not a designated teacher of ``course`` cannot
-    edit it — the staff-blanket bypass is gone. Admins still pass
-    through unconditionally because they're the platform-level
-    safety net for course management.
-    """
+    """Edit / delete ``course``. Course-teacher of this course or admin."""
     if _is_admin(user):
         return True
     return is_course_teacher(user, course, db)
@@ -400,12 +322,7 @@ def ensure_view_user(actor: User, target_id: UUID | str) -> None:
 
 
 def can_change_user_role(actor: User) -> bool:
-    """Whether ``actor`` may change someone else's role.
-
-    Admin only. Today this is the only way a user transitions between
-    student/teacher/admin in the platform DB (Keycloak claim is a
-    separate concern handled at login).
-    """
+    """Whether ``actor`` may change someone else's role. Admin only."""
     return _is_admin(actor)
 
 

@@ -107,18 +107,14 @@ def search_users_keycloak(
             detail="Search query must be at least 2 characters"
         )
 
-    # ``db`` wird per Depends(get_db) injiziert. Vorher öffnete diese
-    # Route die Session manuell über ``next(get_db())`` — das umging
-    # die FastAPI-``dependency_overrides``-Mechanik komplett und ließ
-    # den Router auch im Test gegen die Dev-DB schreiben. Resultat:
-    # Test-Seeds (z.B. ``alice@dhbw.de``) leakten in ``backend_dev``,
-    # und beim nächsten Lauf gab es eine UniqueViolation auf ``email``.
+    # ``db`` is injected via Depends(get_db) so test dependency overrides
+    # apply and the route never writes against the dev DB.
     from app.utils.keycloak_auth import sync_user_from_keycloak
 
     keycloak_users = search_keycloak_users(query, limit)
     results = []
     for kc_user in keycloak_users:
-        # User in lokaler DB anlegen/aktualisieren (zentral)
+        # Create/update the user in the local DB
         db_user = sync_user_from_keycloak(db, kc_user)
         results.append({
             "userId": db_user.userId,
@@ -210,19 +206,11 @@ def update_user(
 ):
     """Update a user record.
 
-    Phase 2 scope cut: Profile-Edit (firstName/lastName/email/username)
-    läuft jetzt ausschließlich über Keycloak — die App hat dafür keinen
-    Endpoint mehr. ``UserUpdate`` trägt nur noch ``role`` und
-    ``courseId``.
-
-    Bug #1 — Role-Change ist Admin-only. Wenn der Request-Body ``role``
-    enthält UND der Caller nicht Admin ist, antworten wir mit 403 und
-    der strukturierten Payload ``{code: "role_required",
-    required: ["admin"]}`` aus :func:`ensure_change_user_role`.
-
-    Sonstige Aktualisierungen (``courseId``) sind ebenfalls Admin-only,
-    weil sie das Datenmodell des Users serverseitig ändern — der User
-    selbst sieht das Feld in Keycloak gar nicht.
+    Profile edits (firstName/lastName/email/username) happen exclusively
+    in Keycloak; ``UserUpdate`` only carries ``role`` and ``courseId``.
+    Both are admin-only: ``role`` changes go through
+    :func:`ensure_change_user_role` (403 with ``{code: "role_required",
+    required: ["admin"]}``), and ``courseId`` changes require admin too.
     """
     user = crud_users.get_user(db, user_id)
     if not user:
@@ -231,9 +219,7 @@ def update_user(
             detail="User not found"
         )
 
-    # Bug #1 — jede Änderung an einer Nicht-Profile-Spalte (heute:
-    # role, courseId) ist Admin-only. Der Caller muss Admin sein,
-    # bevor wir die Mutation durchführen.
+    # Any change to a non-profile column (role, courseId) is admin-only.
     payload = user_update.model_dump(exclude_unset=True)
     if "role" in payload:
         ensure_change_user_role(current_user)
@@ -251,11 +237,7 @@ def update_user(
 
 
 # ----------------------------------------------------------------
-# DELETE USER — entfernt
+# DELETE USER
 # ----------------------------------------------------------------
-# Phase 2 scope cut: User-Delete läuft jetzt ausschließlich über
-# Keycloak. Die App selbst entfernt keine User mehr — historische
-# Daten (Apps, Deployments, Tasks) blieben sonst mit dangling
-# user_ids zurück, und der Operator hatte zwei konkurrierende
-# Quellen-of-Truth zu pflegen. Endpoint wurde entfernt; Keycloak ist
-# die einzige Stelle, an der ein User gelöscht wird.
+# User deletion is handled exclusively in Keycloak; the app exposes no
+# delete endpoint to avoid dangling user_ids on apps/deployments/tasks.

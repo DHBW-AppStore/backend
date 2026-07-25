@@ -27,10 +27,8 @@ def list_teams(
     """
     Get all teams, optionally filtered to a single deployment.
 
-    The ``deployment_id`` query parameter replaces the old
-    ``user_group_id`` filter, which referenced a model that no
-    longer exists. All authenticated users may list teams; per-team
-    membership gating happens at ``GET /teams/{team_id}``.
+    All authenticated users may list teams; per-team membership gating
+    happens at ``GET /teams/{team_id}``.
     """
     teams = crud_teams.get_teams(db, skip=skip, limit=limit, deployment_id=deployment_id)
     return teams

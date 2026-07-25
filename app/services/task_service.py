@@ -10,13 +10,6 @@ Two-phase dispatch:
    RabbitMQ. On success the row's `celeryTaskId` is stamped; on
    failure the row is marked FAILED. Either way the user sees a row
    in the deployment list reflecting reality — no splitbrain.
-
-The previous one-shot `register_new_task` was racy: the policy check,
-the `send_task` call, and the row insert were three separate steps with
-no atomicity. If the worker happened to start before the row insert,
-we'd lose the celery_task_id binding; if `send_task` failed after the
-deployment was committed, the deployment would hang in PENDING forever
-with no task to track it.
 """
 from __future__ import annotations
 
@@ -33,12 +26,10 @@ from app.models import Task, TaskStatus, TaskType
 logger = logging.getLogger(__name__)
 
 
-# Name of the Postgres partial unique index that backstops the
-# "one active task per deployment" rule. Defined in the alembic
-# migration ``2026_05_25_1800-c3d4e5f6a7b8_*.py``. We string-match
-# against the constraint name when translating IntegrityError →
-# ActiveTaskExistsError so we don't accidentally swallow other
-# unique-constraint violations.
+# Name of the Postgres partial unique index backing the "one active
+# task per deployment" rule. String-matched when translating
+# IntegrityError → ActiveTaskExistsError so other unique-constraint
+# violations aren't swallowed.
 _ACTIVE_TASK_UNIQUE_INDEX = "uq_tasks_active_per_deployment"
 
 
@@ -59,14 +50,10 @@ def prepare_task_in_tx(
     atomically.
 
     Raises `ActiveTaskExistsError` if the deployment already has a
-    PENDING/RUNNING task. The Postgres partial unique index on
-    `tasks(deploymentId) WHERE status IN ('PENDING','RUNNING')`
-    enforces this at the DB level too — defense in depth. The
-    application-side pre-check below catches the easy case; the
-    ``except IntegrityError`` around ``db.flush()`` catches the
-    racy one (two concurrent requests both pass the pre-check,
-    one wins the constraint, the other gets translated into the
-    same ActiveTaskExistsError so the router can return 409 cleanly).
+    PENDING/RUNNING task. A Postgres partial unique index enforces this
+    at the DB level too: the pre-check catches the common case, and the
+    ``except IntegrityError`` around ``db.flush()`` catches the racy one
+    (two concurrent requests both pass the pre-check).
     """
     existing = crud_tasks.get_tasks(db, deployment_id=deployment_id)
     for task in existing:
@@ -85,13 +72,10 @@ def prepare_task_in_tx(
     try:
         db.flush()
     except IntegrityError as e:
-        # Race: another transaction inserted a PENDING/RUNNING task
-        # for the same deployment between our pre-check and our
-        # flush. The partial unique index prevents the duplicate;
-        # we translate the DB error into the same domain exception
-        # so the caller's 409-handling branch fires either way.
-        # Leaving the IntegrityError raw would surface as a generic
-        # 500 in the router.
+        # Race: another transaction inserted a PENDING/RUNNING task for
+        # the same deployment between our pre-check and flush. Translate
+        # the constraint violation into the domain exception so the
+        # caller's 409 branch fires.
         if _ACTIVE_TASK_UNIQUE_INDEX in str(e.orig):
             raise ActiveTaskExistsError(
                 f"Deployment {deployment_id} already has an active task "
@@ -139,13 +123,9 @@ def dispatch_to_celery(
 
 
 class TaskService:
-    """Backwards-compat shim for callers that still expect a service.
-
-    The split helpers above are the recommended API; this wrapper exists
-    so the original `task_service.register_new_task` import path keeps
-    working in case anything outside the deployments router still uses
-    it. New code should call `prepare_task_in_tx` + `dispatch_to_celery`
-    directly.
+    """Compatibility shim exposing the old ``register_new_task`` entry
+    point. New code should call `prepare_task_in_tx` +
+    `dispatch_to_celery` directly.
     """
 
     def register_new_task(

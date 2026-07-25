@@ -51,22 +51,14 @@ def approve_version(
 ):
     """Approve a PENDING version — makes it deployable by all users.
 
-    Bevor wir den Status flippen, validieren wir die ``@openstack``-
-    Marker in den Terraform-/Packer-Variablen-Dateien dieser Version.
-    Eine Version mit kaputten Markern soll gar nicht erst approved
-    werden — sonst landen Bugs im Storefront, die der Author beim
-    Submit noch hätte beheben können. Wir nutzen dieselbe Hilfsfunktion
-    wie ``GET /apps/{id}/variables``, damit die Logik genau identisch
-    bleibt (single source of truth — kein Re-Parsing).
+    Validates the ``@openstack`` markers in this version's Terraform/Packer
+    variable files before flipping the status, using the same helper as
+    ``GET /apps/{id}/variables``.
     """
     app = _require_app(db, app_id)
 
-    # Marker-Validierung: ``load_variable_definitions`` parst die
-    # Variablen-Dateien und hängt fehlerhafte Marker als
-    # ``markerError`` an die einzelne Variable. Wir blockieren das
-    # Approval, wenn mindestens eine Variable einen Marker-Bug trägt.
-    # Wenn das Git-Repo nicht erreichbar ist (400/500), überspringen
-    # wir die Validierung — lieber approven als hart blocken.
+    # Block approval if any variable carries a marker error. If the git repo
+    # is unreachable (400/500), skip validation rather than hard-blocking.
     try:
         variables = load_variable_definitions(app, version_tag)
         marker_errors = [

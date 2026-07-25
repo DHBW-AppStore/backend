@@ -126,14 +126,10 @@ def format_logs(logs_data) -> str:
 
 
 def _get_icon(level: str) -> str:
-    """Get the leading marker for a log level.
+    """Get the leading ASCII marker for a log level.
 
-    Returns a short ASCII tag rather than an emoji — the frontend
-    renders the log stream verbatim, and the project's UI guideline
-    is to keep emojis out of all user-visible surfaces (the frontend
-    has its own coloured pill / icon per level in the renderer).
-    The tag length is fixed at four characters so messages line up
-    cleanly in the plain-text log view.
+    Uses a fixed four-character tag (no emoji) so plain-text log lines
+    align cleanly; the frontend renders its own coloured pill per level.
     """
     icons = {
         "DEBUG": "[dbg]",
@@ -146,14 +142,9 @@ def _get_icon(level: str) -> str:
 
 
 # Mapping from common Celery infrastructure exception class names to
-# operator-friendly headlines. The keys are matched as substrings
-# against the raw ``event['exception']`` repr (Celery formats it as
-# e.g. ``NotRegistered('tasks.pause_deployment')``), which is robust
-# against module-prefix changes between Celery versions.
-#
-# We pair each headline with a stable ``failure_kind`` token so the
-# frontend can decide whether to phrase the toast as "deployment
-# broke" vs. "platform mismatch — deployment is unaffected".
+# operator-friendly headlines. Keys are matched as substrings against
+# the raw ``event['exception']`` repr. Each headline is paired with a
+# stable ``failure_kind`` token for the frontend.
 _CELERY_INFRA_EXCEPTIONS: tuple[tuple[str, str, str], ...] = (
     (
         "NotRegistered",
@@ -196,10 +187,8 @@ def _translate_celery_infra_exception(
     """Pick a human-readable headline + failure_kind for known Celery
     infrastructure exceptions.
 
-    Returns ``(None, None)`` when ``exception_repr`` doesn't match any
-    of the known classes — in that case the caller falls back to the
-    raw exception text. The caller is also free to attach the raw
-    text as a "Technische Details" block, which we do today.
+    Returns ``(None, None)`` when ``exception_repr`` matches no known
+    class; the caller then falls back to the raw exception text.
     """
     if not exception_repr:
         return (None, None)
@@ -212,12 +201,9 @@ def _translate_celery_infra_exception(
 def _update_task_progress(deployment_id: str, event: dict) -> None:
     """Persist phase / progress columns for the active deploy task.
 
-    Best-effort: we look up the most recent active task on the
-    deployment (status running/pending) and update two cheap
-    columns. Failures here are logged at debug-level — the live
-    SSE stream is the source-of-truth for users actively watching;
-    the DB columns are only the fallback for users opening the
-    page later.
+    Best-effort: updates two cheap columns on the most recent active
+    task. Failures are logged at debug-level — the SSE stream is the
+    source of truth; these columns are only the reload fallback.
     """
     db: Session = SessionLocal()
     try:
@@ -253,23 +239,19 @@ def _update_task_progress(deployment_id: str, event: dict) -> None:
 def _handle_custom_event(event: dict) -> None:
     """Fan a live progress/log event out to SSE subscribers.
 
-    These are emitted via ``self.send_event(...)`` from inside the
-    deploy task. They don't have a one-to-one mapping to a ``tasks``
-    DB row in the legacy sense; instead they carry ``deployment_id``
-    directly so we can fan them out to SSE subscribers without a DB
+    These are emitted via ``self.send_event(...)`` from the deploy task
+    and carry ``deployment_id`` directly, so they fan out without a DB
     lookup.
     """
     deployment_id = event.get('deployment_id')
     if not deployment_id:
         return
-    # Always forward to any live subscriber first — ephemeral
-    # data shouldn't wait for the DB write.
+    # Forward to live subscribers first; ephemeral data shouldn't wait
+    # for the DB write.
     pubsub.publish(deployment_id, event)
 
-    # For progress events also persist the latest phase /
-    # percent on the active task so a reload of the detail
-    # view after a reconnect shows where things stand without
-    # having to wait for the next event.
+    # For progress events also persist the latest phase / percent so a
+    # detail-view reload after a reconnect shows current state.
     if event.get('type') == 'task-progress':
         _update_task_progress(deployment_id, event)
 
@@ -327,28 +309,21 @@ def _handle_task_succeeded(celery_task_id: str) -> tuple[dict, Any]:
 def _parse_structured_failure(exception_type: Any, traceback: str) -> dict | None:
     """Extract the worker's structured ``Failure`` JSON payload, if present.
 
-    The worker raises ``Failure`` (see worker/app/tasks.py) whose
-    ``args[0]`` is a JSON payload with logs/tf_state/etc. There are two
-    surface forms depending on whether Celery picks up the exception
-    cleanly:
+    The worker raises ``Failure`` whose ``args[0]`` is a JSON payload
+    with logs/tf_state/etc. It can surface in two forms:
 
-     1. clean pickle round-trip (preferred path):
-        ``Failure: {"error": ..., ...}`` in the traceback's final line,
-        AND ``Failure('{"error": ...}')`` in ``event['exception']``
-        (Celery uses ``safe_repr``).
-     2. legacy ``UnpickleableExceptionWrapper`` path (before Failure had
-        ``__reduce__``): ``Failure('...')`` literally inside the traceback.
+     1. ``Failure: {"error": ...}`` in the traceback's final line, and
+        ``Failure('{"error": ...}')`` in ``event['exception']``.
+     2. ``Failure('...')`` literally inside the traceback.
 
-    Match both. Search the exception field first because it's a short,
-    well-defined string; fall back to the full traceback. Returns the
+    Searches the exception field first, then the traceback. Returns the
     decoded dict, or ``None`` when no structured payload could be parsed.
     """
     candidates = [str(exception_type or ''), traceback or '']
     for haystack in candidates:
         if not haystack:
             continue
-        # Form 1a: Failure('<json>')  — repr() / wrapper output
-        # Form 1b: Failure: <json>    — format_exception output
+        # Match ``Failure('<json>')`` or ``Failure: <json>``.
         match = (
             re.search(r"Failure\('(.+?)'\)", haystack, re.DOTALL)
             or re.search(r"Failure:\s*(\{.+?\})\s*$", haystack, re.DOTALL)
@@ -359,8 +334,7 @@ def _parse_structured_failure(exception_type: Any, traceback: str) -> dict | Non
         try:
             return json.loads(json_str)
         except json.JSONDecodeError:
-            # Form 1a wraps the JSON in repr(), so embedded
-            # quotes are backslash-escaped. Decode once.
+            # The repr() form escapes embedded quotes; decode once.
             try:
                 return json.loads(
                     json_str.encode('utf-8').decode('unicode_escape')
@@ -410,23 +384,18 @@ def _apply_infra_failure(
 ) -> str | None:
     """Render an infrastructure-level failure into ``update_data['logs']``.
 
-    No structured ``Failure(...)`` payload — this is almost always a
-    Celery-side infrastructure error (worker doesn't know the task name,
-    worker died mid-task, broker timeout, etc.). The raw
-    ``exception_type`` would be a confusing thing to show the end user
-    (it's a Python repr with a stack trace). Translate the common ones
-    into a short operator-friendly headline; keep the raw text in the
-    same field, but separated by a marker the frontend can split on.
-    Returns the classified ``failure_kind`` (or ``None``) so it can flow
-    to the SSE pubsub event.
+    Used when there's no structured ``Failure(...)`` payload (a
+    Celery-side error: unknown task name, worker died, broker timeout).
+    Translates common ones into a short operator-friendly headline and
+    keeps the raw text after a divider. Returns the classified
+    ``failure_kind`` (or ``None``).
     """
     headline, kind = _translate_celery_infra_exception(
         str(exception_type or '')
     )
     raw_block = f"{exception_type}\n{traceback}".strip()
     if headline:
-        # Two newlines + a divider so the frontend
-        # split can find the boundary deterministically.
+        # Divider so the frontend can split headline from raw details.
         update_data['logs'] = (
             f"{headline}\n\n"
             f"--- Technische Details ---\n{raw_block}"
@@ -457,8 +426,8 @@ def _handle_task_failed(celery_task_id: str, event: dict) -> tuple[dict, str | N
     try:
         failure_data = _parse_structured_failure(exception_type, traceback)
         if failure_data is not None:
-            # Structured worker-side failure (terraform
-            # apply broke, packer build failed, etc.).
+            # Structured worker-side failure (terraform apply, packer
+            # build, etc.).
             failure_kind = "worker_failure"
             _apply_structured_failure(update_data, failure_data)
             logger.info(f"[FAILED] Extracted structured failure data for {celery_task_id}: {update_data}")
@@ -466,9 +435,6 @@ def _handle_task_failed(celery_task_id: str, event: dict) -> tuple[dict, str | N
             raise ValueError("Not structured failure format")
     except Exception as parse_error:
         logger.warning(f"Could not parse structured failure: {parse_error}")
-        # ``failure_kind`` flows to the SSE pubsub event below so the UI
-        # knows whether to surface a "deployment failed" or a
-        # "worker mismatch" message.
         failure_kind = _apply_infra_failure(update_data, exception_type, traceback)
     logger.info(f"[FAILED] Update data for {celery_task_id}: {update_data}")
     return update_data, failure_kind
@@ -486,12 +452,9 @@ def _handle_task_revoked(celery_task_id: str) -> dict:
 def _auto_soft_delete_on_destroy(db: Session, task) -> None:
     """Soft-delete the deployment after a successful destroy.
 
-    A successful destroy means the OpenStack resources are gone —
-    keeping the deployment in the active list would just leave a ghost
-    row with nothing to operate on. Soft-deleting it here unifies
-    "destroy + remove from UI" into one user action while preserving the
-    audit trail (the row plus all its tasks/logs survive in the DB, just
-    hidden from the default queries).
+    The OpenStack resources are gone, so soft-deleting unifies
+    "destroy + remove from UI" into one action while keeping the row
+    and its tasks/logs for the audit trail.
     """
     try:
         crud_deployments.soft_delete_deployment(db, task.deploymentId)
@@ -499,9 +462,8 @@ def _auto_soft_delete_on_destroy(db: Session, task) -> None:
             f"Auto-soft-deleted deployment {task.deploymentId} after successful destroy"
         )
     except Exception as e:
-        # Don't let a failed soft-delete bury the success
-        # event itself — the user can still trigger the
-        # standalone Delete action from the UI.
+        # Don't let a failed soft-delete bury the success event; the
+        # user can still trigger the standalone Delete action.
         logger.error(
             f"Auto-soft-delete failed for deployment {task.deploymentId}: {e}"
         )
@@ -510,10 +472,9 @@ def _auto_soft_delete_on_destroy(db: Session, task) -> None:
 def _notify_deploy_succeeded(db: Session, task, outputs: Any) -> None:
     """Send the success notification mail for a completed deploy.
 
-    ``outputs`` was already pulled out of the AsyncResult in the
-    task-succeeded branch above; reuse that dict instead of re-fetching.
-    The notifier handles its own errors and won't bubble up — a flaky
-    SMTP or missing creds must never tank the deploy itself.
+    Reuses the ``outputs`` dict pulled in the task-succeeded branch.
+    The notifier handles its own errors so a flaky SMTP never tanks
+    the deploy.
     """
     try:
         deployment_notifier.notify_deployment_succeeded(
@@ -530,12 +491,8 @@ def _notify_deploy_succeeded(db: Session, task, outputs: Any) -> None:
 def _publish_lifecycle_transition(
     task, event_type: str, failure_kind: str | None
 ) -> None:
-    """Notify open SSE subscribers about a lifecycle transition.
-
-    So they can close their stream and trigger the frontend's
-    static-log render. Without this, ``stream_deployment_events`` waits
-    forever on its queue and the page sits on the progress bar even
-    after the task finished.
+    """Notify open SSE subscribers about a lifecycle transition so they
+    can close their stream and trigger the static-log render.
     """
     pubsub_payload: dict[str, Any] = {
         "type": event_type,
@@ -548,22 +505,19 @@ def _publish_lifecycle_transition(
             else "cancelled"
         ),
     }
-    # Only attach ``failure_kind`` on task-failed and only
-    # if we managed to classify it — frontends can treat
-    # missing/None as "deployment-level worker failure"
-    # for backwards compat.
+    # Attach ``failure_kind`` only on task-failed and only when
+    # classified; frontends treat missing/None as a worker failure.
     if event_type == 'task-failed' and failure_kind:
         pubsub_payload["failure_kind"] = failure_kind
     pubsub.publish(str(task.deploymentId), pubsub_payload)
 
 
 def _handle_lifecycle_event(event: dict, event_type: str, celery_task_id: str) -> None:
-    """Process a lifecycle event: update the task row + post-update side-effects.
+    """Process a lifecycle event: update the task row + side-effects.
 
     Looks up the task by ``celery_task_id``, dispatches to the per-event
-    builder to compute the update payload, then applies the shared
-    side-effects (DB update, auto-soft-delete, deploy notify, pubsub) in
-    the exact order the previous inline implementation used.
+    builder for the update payload, then applies the shared side-effects
+    (DB update, auto-soft-delete, deploy notify, pubsub).
     """
     db: Session = SessionLocal()
     try:
@@ -575,23 +529,14 @@ def _handle_lifecycle_event(event: dict, event_type: str, celery_task_id: str) -
 
         task = tasks[0]
         update_data: dict = {}
-        # Pre-initialise so the notify hook below can read it
-        # regardless of which branch ran. The task-succeeded branch
-        # overwrites this with the worker's actual return payload.
+        # Pre-initialise so the notify hook can read it regardless of
+        # branch; the task-succeeded branch overwrites it.
         outputs: Any = None
-        # Classification of a task-failed event so the SSE pubsub
-        # event can carry it through to the frontend without a
-        # second DB roundtrip:
-        #   * ``worker_failure`` — the worker raised a structured
-        #     ``Failure(...)`` (deploy/destroy/pause/resume code
-        #     hit a real error condition like terraform apply
-        #     failure).
-        #   * ``celery_infrastructure`` — a Celery / broker-level
-        #     issue: the worker doesn't know the task name
-        #     (NotRegistered), the worker process died
-        #     (WorkerLostError), the message timed out, etc.
-        #     Surfacing these as "deployment failed" is misleading
-        #     because the deployment itself wasn't even touched.
+        # Classification of a task-failed event, carried through to the
+        # SSE pubsub event:
+        #   * ``worker_failure`` — worker raised a structured ``Failure``.
+        #   * ``celery_infrastructure`` — a Celery/broker-level issue
+        #     where the deployment itself wasn't touched.
         failure_kind: str | None = None
 
         # Handle different event types

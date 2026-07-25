@@ -32,18 +32,13 @@ def _is_destroyed_subq():
 def count_active_user_deployments(db: Session, user_id: UUID) -> int:
     """Number of *active* deployments owned by ``user_id``.
 
-    "Active" here matches what the user actually sees on the Deployments
-    page:
+    "Active" here matches what the user sees on the Deployments page:
 
       * Owned by them (``Deployment.userId == user_id``).
-      * Not soft-deleted (``deleted_at IS NULL``) — once the user has
-        clicked "Löschen" we must not keep the credentials locked
-        against a row that is no longer visible to them.
+      * Not soft-deleted (``deleted_at IS NULL``).
       * Has not been fully destroyed (no successful DESTROY task) —
-        soft-delete happens AFTER destroy completes, so during the
-        destroy-in-flight phase ``deleted_at`` may still be NULL but
-        the deployment is on its way out. Keeping the destroyed-check
-        is harmless and matches the historical contract.
+        soft-delete happens after destroy completes, so the check
+        covers the destroy-in-flight window too.
     """
     return (
         db.query(Deployment)
@@ -127,30 +122,18 @@ def derive_status(
     """Synthesize the effective deployment status from the latest task's
     ``(status, type)`` pair.
 
-    The bare ``task.status`` (pending/running/success/failed/cancelled) is
-    not enough by itself: a destroy task in flight should surface as
-    ``destroying`` and a finished destroy as ``destroyed``, neither of
-    which exists as a stored enum value. We synthesize them here so the
-    same mapping is used by the single-deployment path
-    (``get_deployment_status``) and the bulk list path
-    (``bulk_get_task_summary``).
-
-    Pause/resume follow the same pattern:
+    ``task.status`` alone isn't enough: a destroy in flight surfaces as
+    ``destroying`` and a finished destroy as ``destroyed`` (neither is a
+    stored enum value). Pause/resume follow the same pattern:
 
     * ``(PAUSE,  pending|running)`` → ``pausing``
     * ``(PAUSE,  success)``         → ``paused``
     * ``(RESUME, pending|running)`` → ``resuming``
-    * ``(RESUME, success)``         → falls through to ``success``,
-      so a resumed deployment behaves identically to a fresh deploy
-      from the lifecycle matrix's point of view (PAUSE is offered
-      again, RESUME isn't).
+    * ``(RESUME, success)``         → falls through to ``success``
 
-    PAUSE/RESUME ``failed`` and ``cancelled`` are intentionally NOT
-    rewritten — they bleed through unchanged so the user sees the
-    pause/resume itself broke (vs. the original deploy succeeded).
-    Destroy is still available from ``failed`` to recover.
-
-    Returns ``None`` if the deployment has no tasks yet.
+    PAUSE/RESUME ``failed``/``cancelled`` bleed through unchanged so the
+    user sees the pause/resume itself broke. Returns ``None`` when the
+    deployment has no tasks yet.
     """
     if task_status is None:
         return None
@@ -171,27 +154,20 @@ def derive_status(
         if raw_status == "success":
             return "paused"
         if raw_status == "failed":
-            # Distinguish a *pause* failure from a *deploy* failure —
-            # the OpenStack resources are still running, only the
-            # stop-instances pass broke. The user shouldn't see this
-            # as a generic "failed" because the deployment itself is
-            # unaffected; the lifecycle matrix below still allows
-            # destroy / pause-retry / resume from this synthetic
-            # state.
+            # Distinguish a pause failure from a deploy failure — the
+            # resources are still running, only the stop pass broke.
             return "pause_failed"
         # cancelled bleeds through unchanged.
     elif raw_type == "resume":
         if raw_status in ("pending", "running"):
             return "resuming"
         if raw_status == "failed":
-            # Same logic as pause_failed: the SHUTOFF instances are
-            # still there, only the start pass tripped. Surface that
-            # so the user can retry resume or destroy without first
-            # being scared by a generic failed badge.
+            # Same as pause_failed: instances are still SHUTOFF, only
+            # the start pass tripped.
             return "resume_failed"
-        # On resume success the deployment is "running again" — we
-        # let raw_status = "success" pass through so the lifecycle
-        # matrix treats it like a fresh successful deploy.
+        # On resume success the deployment is running again; let
+        # "success" pass through so the lifecycle matrix treats it like
+        # a fresh successful deploy.
     return raw_status
 
 
@@ -222,15 +198,10 @@ def bulk_get_task_summary(
 ) -> dict[UUID, tuple[TaskStatus | None, TaskType | None, datetime | None]]:
     """Fetch the latest-task ``(status, type)`` and the first-task
     ``created_at`` for every deployment in ``deployment_ids`` — in two
-    queries, regardless of how many deployments are passed.
-
-    Replaces the per-row ``get_latest_task`` + ``get_first_task`` fan-out
-    that the list endpoint used to do (1 + 2N queries → 3 queries for the
-    same payload). Mirrors the window-function pattern used by
-    ``routers/dashboard.py:get_dashboard_stats``.
+    queries regardless of how many deployments are passed.
 
     Returns a dict keyed by ``deploymentId``. Deployments with no tasks
-    are simply absent from the map; the caller must handle that with
+    are absent from the map; callers use
     ``.get(deployment_id, (None, None, None))``.
     """
 
@@ -358,13 +329,11 @@ def get_deployments(
 
     ``user_id`` filters by deployment owner (``Deployment.userId``).
 
-    ``member_user_id`` filters by **either** owner or membership: a
-    deployment matches when the user is the creator OR appears in any
-    team's ``UserToTeam`` row OR has a direct ``UserToDeployment``
-    mapping. Used by the listing endpoint so a student sees deployments
-    they were added to without seeing every deployment in the system.
+    ``member_user_id`` filters by owner or membership: a deployment
+    matches when the user is the creator OR appears in any team's
+    ``UserToTeam`` row OR has a direct ``UserToDeployment`` mapping.
     Mutually exclusive with ``user_id``; if both are set ``user_id``
-    wins (caller bug, but the stricter filter is the safer default).
+    wins.
     """
     query = db.query(Deployment)
 
@@ -375,9 +344,8 @@ def get_deployments(
     if user_id:
         query = query.filter(Deployment.userId == user_id)
     elif member_user_id:
-        # Owner OR team member OR direct mapping. Use a UNION-ish
-        # approach via a subquery on teamIds the user belongs to so
-        # the OR doesn't explode into a cartesian.
+        # Owner OR team member OR direct mapping, via a subquery on the
+        # user's teamIds so the OR doesn't explode into a cartesian.
         member_team_ids = (
             db.query(UserToTeam.teamId).filter(UserToTeam.userId == member_user_id)
         )
@@ -396,14 +364,11 @@ def get_deployments(
     if app_id:
         query = query.filter(Deployment.appId == app_id)
 
-    # Filter by effective status. The status the API exposes is derived
-    # from the LATEST task per deployment (see ``derive_status``), so we
-    # join against a window-function subquery that pins the latest task
-    # per deployment and apply the equivalent SQL predicate. Doing this
-    # here — BEFORE offset/limit — keeps the page size correct: the old
-    # post-filter loop only ever inspected the first ``limit`` rows, so
-    # filtering by ``running`` could return fewer than ``limit`` matches
-    # even when the DB had more.
+    # Filter by effective status. The exposed status is derived from the
+    # LATEST task per deployment (see ``derive_status``), so we join a
+    # window-function subquery pinning the latest task and apply the
+    # equivalent predicate here — before offset/limit — so the page size
+    # stays correct.
     if status:
         latest_rn = (
             func.row_number()
@@ -437,19 +402,14 @@ def get_deployments(
                 latest_subq.c.status == TaskStatus.SUCCESS,
             )
         else:
-            # Plain task statuses. Mirror the ``derive_status`` mapping:
-            # - ``pending``/``running``/``success`` only match deploy-
-            #   typed tasks (destroy + same status surfaces as
-            #   ``destroying``/``destroyed``, not the raw value).
-            # - ``failed``/``cancelled`` bleed through both task types,
-            #   matching the comment in ``derive_status`` that a broken
-            #   destroy must surface as ``failed``/``cancelled`` so the
-            #   user sees the destroy itself broke.
+            # Plain task statuses, mirroring ``derive_status``:
+            # - ``pending``/``running``/``success`` match deploy-typed
+            #   tasks only (destroy surfaces as destroying/destroyed).
+            # - ``failed``/``cancelled`` bleed through both task types.
             try:
                 status_enum = TaskStatus(status)
             except ValueError:
-                # Unknown status string → empty result, like the old
-                # post-filter loop would have produced.
+                # Unknown status string → empty result.
                 return []
             query = query.filter(latest_subq.c.status == status_enum)
             if status_enum in (
@@ -459,7 +419,7 @@ def get_deployments(
             ):
                 query = query.filter(latest_subq.c.type != TaskType.DESTROY)
 
-    # Order by deploymentId (UUID) - could also join with Task for created_at ordering
+    # Order by deploymentId (UUID)
     query = query.order_by(desc(Deployment.deploymentId))
 
     return query.offset(skip).limit(limit).all()

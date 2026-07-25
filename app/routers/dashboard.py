@@ -26,13 +26,10 @@ class DashboardStatsResponse(BaseModel):
     deployments: int
     apps: int
     courses: int
-    # Phase 3 — course-teacher scope counter. Counts deployments
-    # whose owner sits inside one of the requestor's taught courses.
-    # 0 for students (who can't be course-teachers), 0 for teachers
-    # without any ``course_teachers`` row, and (rare) 0 for admins
-    # who aren't explicitly registered as a course-teacher anywhere.
-    # The field is always present so the frontend can render the
-    # "Kurs-Scope" tile without a separate request.
+    # Counts deployments whose owner sits inside one of the requestor's
+    # taught courses. 0 for anyone not registered as a course-teacher.
+    # Always present so the frontend can render the scope tile without
+    # a separate request.
     courseScopeDeployments: int = 0
 
 
@@ -65,8 +62,8 @@ def get_dashboard_stats(
       * Teacher/Student: own apps (regardless of ``is_private`` /
         approval state) OR public apps (``is_private = False``)
         with at least one APPROVED version — mirrors
-        ``crud_apps.get_visible_apps``. Bug #6 fix: Teacher gets the
-        student-style filter; the staff-blanket-view is gone.
+        ``crud_apps.get_visible_apps``. Teacher gets the student-style
+        filter.
 
     Soft-deleted rows (``deleted_at IS NOT NULL``) are excluded on both
     counters — same as the list endpoints.
@@ -105,8 +102,7 @@ def get_dashboard_stats(
     # Apps visible to the user — role-branched, same gate as the
     # ``/apps`` endpoint at ``routers/apps.py``. Admin sees everything
     # non-deleted (mirrors ``crud_apps.get_apps``); everyone else
-    # (incl. Teacher, per Phase 2 Bug #6) sees own + public-approved
-    # (mirrors ``crud_apps.get_visible_apps``).
+    # sees own + public-approved (mirrors ``crud_apps.get_visible_apps``).
     if current_user.role == UserRole.ADMIN:
         apps_total = (
             db.query(func.count(App.appId))
@@ -135,11 +131,9 @@ def get_dashboard_stats(
 
     courses_total = db.query(func.count(Course.courseId)).scalar() or 0
 
-    # Phase 3 — course-teacher scope counter. Loaded once via the
-    # capability helper so this stays a single small lookup. The
-    # join below counts deployments whose owner sits in one of the
-    # requestor's taught courses; soft-deleted deployments are
-    # excluded the same way as the primary counter.
+    # Course-teacher scope counter. Counts deployments whose owner sits
+    # in one of the requestor's taught courses; soft-deleted deployments
+    # are excluded the same way as the primary counter.
     course_scope_deployments = 0
     my_course_ids = get_my_course_teacher_ids(current_user, db)
     if my_course_ids:

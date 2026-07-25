@@ -21,10 +21,8 @@ class UserCreate(UserBase):
 
 
 class UserUpdate(BaseModel):
-    # Phase 2 — Profile editing (firstName/lastName/email/username) is
-    # no longer part of this app. Self-service runs exclusively
-    # through Keycloak. The only remaining update path is
-    # ``role`` and is admin-only (see ``PUT /users/{id}``).
+    # Profile fields are managed exclusively through Keycloak; the only
+    # update path here is ``role`` and it is admin-only.
     role: UserRole | None = None
     courseId: UUID | None = None
 
@@ -86,11 +84,9 @@ class CourseWithUsers(CourseResponse):
 class CourseMembersUpdate(BaseModel):
     """Body for bulk-adding members to a course.
 
-    Course membership lives on ``users.courseId``, so a "member" is
-    just a user-id whose FK we (re-)point to this course. Existing
-    enrollments on other courses are silently overwritten — the UI's
-    add-button is also a "move into this course" button; that's the
-    explicit semantics.
+    Course membership lives on ``users.courseId``, so a "member" is a
+    user-id whose FK is (re-)pointed to this course; an existing
+    enrollment on another course is overwritten.
     """
     userIds: list[UUID] = []
 
@@ -117,20 +113,13 @@ class AppCreate(AppBase):
 
 class AppUpdate(BaseModel):
     # ``git_link`` is intentionally NOT editable — once an app has
-    # deployments, changing the repo would make the existing version
-    # history inconsistent (old deployments still point at the old
-    # repo via tags, but ``apps.git_link`` would now resolve elsewhere).
-    # Unknown fields in the request body are silently ignored by
-    # Pydantic, and ``crud.apps.update_app`` excludes ``git_link``
-    # from its setattr loop as a defense-in-depth.
+    # deployments, changing the repo would make the version history
+    # inconsistent. Callers may include it; it is silently ignored.
     name: str | None = None
     description: str | None = None
-    # git_link is immutable after creation — omitted here intentionally.
-    # Callers may include it; it is silently ignored (extra="ignore").
     is_private: bool | None = None
-    # Same data-URL convention as ``AppCreate``. Pass ``""`` (empty
-    # string) to explicitly clear the image; ``None`` (the default)
-    # leaves it unchanged.
+    # Same data-URL convention as ``AppCreate``. Pass ``""`` to clear
+    # the image; ``None`` (the default) leaves it unchanged.
     image: str | None = None
 
     model_config = ConfigDict(extra="ignore")
@@ -209,17 +198,12 @@ class DeploymentBase(BaseModel):
 class DeploymentFileUpload(BaseModel):
     """Single file uploaded by the teacher in the deploy wizard.
 
-    Carries the original filename + base64 payload + metadata. The
-    backend persists this verbatim into ``userInputVar.terraform``
-    keyed by the variable name and (for team/user scope) the
-    recipient key, so the worker can pass it through to terraform
-    as a typed map and the cloud-init template can decode it back
-    into ``write_files`` entries.
+    Persisted verbatim into ``userInputVar.terraform`` keyed by the
+    variable name (and recipient key for team/user scope) so the worker
+    passes it to terraform and cloud-init decodes it into ``write_files``.
 
-    ``content_b64`` MUST be standard (RFC 4648) base64 with optional
-    padding. The router decodes once to validate; the value sent to
-    Terraform stays base64 so cloud-init's ``encoding: b64`` directive
-    can write it without further transformation.
+    ``content_b64`` MUST be standard (RFC 4648) base64. The value sent
+    to Terraform stays base64 for cloud-init's ``encoding: b64``.
     """
     name: str
     content_b64: str
@@ -284,9 +268,8 @@ class TaskSummary(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     created_at: datetime
-    # Live-progress fields (mirror of Task model). Frontend renders the
-    # progress bar from these when reloading the page mid-deploy; the
-    # SSE stream supplies real-time updates while the page is open.
+    # Live-progress fields (mirror of Task model), used to render the
+    # progress bar on page reload; SSE supplies real-time updates.
     current_phase: str | None = None
     progress_pct: int | None = None
 
@@ -317,20 +300,18 @@ class DeploymentDetail(DeploymentWithRelations):
 # ----------------------------------------------------------------
 # These mirror the dataclasses in ``app/services/deployment_status.py``
 # 1:1 so the conversion at the endpoint boundary is a plain
-# ``model_validate(asdict(view))``. Kept here (instead of generated
-# from dataclasses) because Pydantic plays nicer with FastAPI's
-# OpenAPI emitter and because the dataclasses live in a service
-# module that should not depend on Pydantic for unit-testability.
+# ``model_validate(asdict(view))``. Defined separately from the
+# dataclasses because Pydantic integrates better with FastAPI's OpenAPI
+# emitter and the service module stays free of a Pydantic dependency.
 
 
 class LifecycleStatesSchema(BaseModel):
     """Server lifecycle quad + optional fault message.
 
-    Fields are pass-through from OpenStack's Nova response; values
-    are stable strings (e.g. ``"ACTIVE"`` / ``"BUILD"`` /
-    ``"ERROR"``). The frontend renders a pill from
-    ``status`` + ``task_state`` and shows ``fault_message`` as a
-    banner when ``status == "ERROR"``.
+    Fields are pass-through from OpenStack's Nova response (stable
+    strings like ``"ACTIVE"`` / ``"BUILD"`` / ``"ERROR"``). The frontend
+    renders a pill from ``status`` + ``task_state`` and shows
+    ``fault_message`` as a banner when ``status == "ERROR"``.
     """
     status: str | None = None
     task_state: str | None = None
@@ -460,12 +441,8 @@ class TaskResponse(TaskBase):
 # ----------------------------------------------------------------
 # TEAM SCHEMAS
 #
-# Teams are today bound directly to a deployment (FK
-# ``deployments.deploymentId`` -> ``Team.deploymentId``). The old
-# intermediate model ``UserGroup`` was removed in the pre-RBAC refactor;
-# all ``userGroupId`` fields were dead schema code afterwards, which
-# caused a 500 ResponseValidationError when serializing the response
-# to ``Team`` (which only has ``deploymentId``). The schemas now
+# Teams are bound directly to a deployment (FK
+# ``deployments.deploymentId`` -> ``Team.deploymentId``). The schemas
 # mirror the model 1:1.
 # ----------------------------------------------------------------
 class TeamBase(BaseModel):
