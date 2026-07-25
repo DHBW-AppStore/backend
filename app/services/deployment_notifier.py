@@ -9,18 +9,25 @@ Two flavours:
 
 Both consume the worker's terraform outputs (``team_vms``,
 ``user_accounts``, ``teams_summary``) plus the deployment's team/user
-membership from the DB.
+membership from the DB. The output shape is documented inline below
+so a future template change doesn't have to re-discover it from a
+real run.
 
-Every recipient is pulled fresh from Keycloak
-(``refresh_user_from_keycloak``) right before the mail is composed so a
-changed address is honoured; the refresh is best-effort and falls back
-to the DB record when Keycloak is unreachable. Failures are logged at
-the call site and never bubble up — sending mail is best-effort.
+Recipient freshness: every recipient is pulled from Keycloak
+(``refresh_user_from_keycloak``) right before the mail is composed.
+A deploy can run for many minutes between the wizard pick and the
+notification, and the team member's address may have changed in the
+meantime — refusing to refresh would silently send credentials to a
+stale address. The refresh is best-effort: when Keycloak is down or
+the user was deleted upstream we fall back to the DB record so a
+flaky identity provider can't tank the entire notification flow.
+
+Failures are logged at the call site and never bubble up — sending
+mail is best-effort, the deploy itself is already done.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 from uuid import UUID
@@ -29,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.crud import deployments as crud_deployments
-from app.models import App, Deployment, Task, TaskStatus, TaskType, Team, User
+from app.models import App, Deployment, Team, User
 from app.services import email_service
 from app.utils.keycloak_auth import refresh_user_from_keycloak
 
@@ -39,8 +46,10 @@ logger = logging.getLogger(__name__)
 def _display_name(user: User) -> str:
     """Render a user-friendly greeting name.
 
-    Preference: firstName + lastName → firstName → username. Never
-    returns an empty string.
+    Order of preference: firstName + lastName → firstName → username.
+    Keeps username as the technical identifier; the templates can
+    still reference ``user.username`` directly when they need the
+    raw login. Never returns an empty string.
     """
     parts = [p for p in (getattr(user, "firstName", None), getattr(user, "lastName", None)) if p]
     if parts:
@@ -52,25 +61,59 @@ def _display_name(user: User) -> str:
 # Outputs parsing
 # ----------------------------------------------------------------------------
 #
-# Worker tasks return ``terraform_outputs`` as the raw JSON object from
-# ``terraform output -json`` (each top-level key is an output name with
-# ``{value, type, sensitive}``). We read the ``value`` of three
-# well-known outputs:
+# Worker tasks return ``terraform_outputs`` as the raw JSON object
+# Terraform's ``output -json`` produces, i.e. each top-level key is an
+# output name with ``{value, type, sensitive}`` underneath. We only care
+# about the ``value`` of three well-known outputs from the Online-IDE
+# template (and any template that follows the same conventions):
 #
-#   team_vms.value:    {"Team-1": {code_server_url, floating_ip,
-#                       fixed_ip, instance_id, instance_name}, ...}
-#   user_accounts.value: {"Team-1-luca": {auth, ip, port, type,
-#                       username}, ...}
-#   teams_summary.value: {"Team-1": 1, ...}  — member counts.
+#   team_vms.value:
+#     {
+#       "Team-1": {
+#         "code_server_url": "http://1.2.3.4:8080",
+#         "floating_ip":     "1.2.3.4",
+#         "fixed_ip":        "10.100.x.y",
+#         "instance_id":     "uuid",
+#         "instance_name":   "online-ide-Team-1"
+#       },
+#       ...
+#     }
 #
-# ``user_accounts`` auth-type contract (``type`` slot):
-#   * ``password`` (default) — ``auth`` is the password string.
-#   * ``ssh_key``  — ``auth`` is the public key / hint.
-#   * ``oauth``    — ``auth`` is the login URL.
-#   * ``none``     — no credential shipped.
-#   Unknown types fall back to ``password`` rendering.
+#   user_accounts.value:
+#     {
+#       "Team-1-luca": {
+#         "auth":     "<password-or-key-or-login-url>",
+#         "ip":       "1.2.3.4",
+#         "port":     8080,
+#         "type":     "password" | "ssh_key" | "oauth" | "none",
+#         "username": "luca"
+#       },
+#       ...
+#     }
 #
-# Missing outputs yield empty dicts and the mail omits those sections.
+#   Auth-type contract:
+#     * ``password`` (default if omitted) — ``auth`` is the password
+#       string. The mail prints a "Password" line.
+#     * ``ssh_key``  — ``auth`` is the public key the user should use
+#       (or a one-line hint about which key was pre-provisioned). The
+#       mail prints an "SSH key" line in a monospace block.
+#     * ``oauth``    — ``auth`` is the login URL the user should click
+#       (e.g. an external IdP). The mail prints "Login via …" with
+#       the URL.
+#     * ``none``     — no credential is shipped (open dashboard, no
+#       auth wall). ``auth`` may be omitted; the mail leaves out the
+#       credentials block entirely and only ships URL/IP.
+#   An unknown ``type`` falls back to ``password`` rendering for
+#   safety (the mail still shows whatever ``auth`` value the app
+#   produced rather than silently dropping it).
+#
+#   teams_summary.value: {"Team-1": 1, ...}  — member counts; not used
+#                                              directly but useful as a
+#                                              sanity check.
+#
+# When a template doesn't expose one of these (e.g. an app without
+# per-user credentials), the helpers return empty dicts and the mail
+# silently omits those sections.
 
 
 def _output_value(outputs: dict[str, Any] | None, key: str) -> Any:
@@ -96,7 +139,9 @@ def _user_accounts(outputs: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
 def _vm_for_team(outputs: dict[str, Any] | None, team_name: str) -> dict[str, Any] | None:
     """Pick the VM block for one team, normalised to the keys the
     template expects (``url``, ``floating_ip``, ``fixed_ip``,
-    ``instance_name``). Only recognised keys are normalised.
+    ``instance_name``). Templates that emit different keys (e.g.
+    ``url`` instead of ``code_server_url``) are tolerated because we
+    only normalise what we recognise.
     """
     raw = _team_vms(outputs).get(team_name)
     if not isinstance(raw, dict):
@@ -112,10 +157,16 @@ def _vm_for_team(outputs: dict[str, Any] | None, team_name: str) -> dict[str, An
 def _normalise_account_key(value: str | None) -> str:
     """Normalise an account/username key for fuzzy matching.
 
-    Worker templates derive account names from emails by replacing
-    non-``[a-z0-9]`` characters. This collapses ``.``/``-``/``_``/spaces
-    to a single ``-`` and lowercases, so forms like ``luca.baeck``,
-    ``luca-baeck`` and ``LUCA_BAECK`` map to the same canonical string.
+    Worker templates derive Linux-friendly account names from emails
+    by replacing every non-``[a-z0-9]`` character with a single ``-``.
+    A user with email ``luca.baeck@gmail.com`` becomes ``luca-baeck``
+    in the terraform output, while our DB has ``luca`` as the
+    username and ``luca.baeck`` as the email's local-part. Comparing
+    those literally misses every match where the template applied any
+    transformation. We collapse ``.``/``-``/``_``/spaces to a single
+    ``-`` and lowercase, so all four forms map to the same canonical
+    string and the matcher succeeds without us having to know which
+    transformation a given template applied.
     """
     if not value:
         return ""
@@ -126,25 +177,40 @@ def _normalise_account_key(value: str | None) -> str:
         elif ch in ".-_ ":
             out.append("-")
         # Other characters drop entirely.
-    # Collapse runs of "-" into one.
+    # Collapse runs of "-" into one so "a..b" and "a-b" both end up
+    # as "a-b".
     canonical = "".join(out)
     while "--" in canonical:
         canonical = canonical.replace("--", "-")
     return canonical.strip("-")
 
 
-def _access_for_user(
+def _find_account_for_user(
     outputs: dict[str, Any] | None,
     team_name: str,
     user: User,
-) -> dict[str, Any] | None:
-    """Find the user's access entry in the worker's outputs.
+) -> tuple[str, dict[str, Any]] | None:
+    """Locate the user's raw account entry in the worker's outputs.
 
-    Templates key per-user accounts as ``"<team>-<account-name>"`` where
-    ``<account-name>`` is some derivation of the user's email or
-    username. To avoid coupling to one naming scheme we build candidate
-    identifiers (username, email local-part, full name) plus their
-    normalised forms and match any overlapping account.
+    Templates key per-user accounts as ``"<team>-<account-name>"``
+    where ``<account-name>`` is some derivation of the user's email
+    or username — the Online-IDE template, for example, takes the
+    email's local-part and substitutes non-alphanumerics with ``-``.
+
+    To find the right entry without coupling to one specific naming
+    scheme we build a set of candidate identifiers from everything
+    we know about the user (username, email local-part, full name)
+    plus a normalised form of each, then walk every account in the
+    output and check for any overlap. ``_normalise_account_key``
+    makes ``luca.baeck``, ``luca-baeck`` and ``LUCA_BAECK`` all
+    compare equal.
+
+    Returns ``(key, raw_entry)`` on a match — the ORIGINAL output key
+    alongside the untouched account dict — or ``None``. Kept separate
+    from :func:`_access_for_user` so callers that need the raw entry
+    (e.g. the per-member ``/my-access`` endpoint, whose response mirrors
+    the terraform ``user_accounts`` shape) reuse the exact same matching
+    logic as the mail path without re-deriving the normalised form.
     """
     accounts = _user_accounts(outputs)
     candidates_raw: set[str] = {
@@ -159,9 +225,10 @@ def _access_for_user(
     for key, raw in accounts.items():
         if not isinstance(raw, dict):
             continue
-        # Strip the team-name prefix so ``"Team-1-luca-baeck"`` becomes
-        # ``"luca-baeck"`` before matching. The prefix is normalised the
-        # same way so a team named ``"Team 1"`` also matches.
+        # Strip the team-name prefix when present so a key like
+        # ``"Team-1-luca-baeck"`` becomes ``"luca-baeck"`` before
+        # normalisation. The prefix itself is normalised the same
+        # way so a team named ``"Team 1"`` (space) also matches.
         team_prefix = _normalise_account_key(team_name) + "-"
         normalised_key = _normalise_account_key(key)
         suffix = normalised_key[len(team_prefix):] if normalised_key.startswith(team_prefix) else normalised_key
@@ -170,28 +237,56 @@ def _access_for_user(
         candidates_with_inner_username.discard("")
 
         if suffix in candidates_with_inner_username:
-            # Normalise the ``type`` slot; unknown values fall back to
-            # ``password`` rendering.
-            raw_type = raw.get("type")
-            auth_type = raw_type if raw_type in ("password", "ssh_key", "oauth", "none") else "password"
-            auth_value = raw.get("auth")
-            # ``password`` is only populated for the password type;
-            # templates check ``auth_type`` before reading it.
-            password = auth_value if auth_type == "password" else None
-            return {
-                "username": raw.get("username") or suffix,
-                "password": password,
-                "ip": raw.get("ip"),
-                "port": raw.get("port"),
-                "auth_type": auth_type,
-                # Raw credential regardless of type; templates use it
-                # with ``auth_type`` to decide where to show it.
-                "auth_value": auth_value,
-                # Fallback URL from the team VM when the per-user output
-                # doesn't carry one.
-                "url": (_vm_for_team(outputs, team_name) or {}).get("url"),
-            }
+            return key, raw
     return None
+
+
+def _access_for_user(
+    outputs: dict[str, Any] | None,
+    team_name: str,
+    user: User,
+) -> dict[str, Any] | None:
+    """Build the normalised access dict the mail templates consume.
+
+    Thin wrapper over :func:`_find_account_for_user`: locates the user's
+    raw account entry, then maps it onto the ``username`` /
+    ``auth_type`` / ``auth_value`` shape the Jinja mail templates expect.
+    Returns ``None`` when no entry matches the user.
+    """
+    match = _find_account_for_user(outputs, team_name, user)
+    if match is None:
+        return None
+    key, raw = match
+    team_prefix = _normalise_account_key(team_name) + "-"
+    normalised_key = _normalise_account_key(key)
+    suffix = normalised_key[len(team_prefix):] if normalised_key.startswith(team_prefix) else normalised_key
+
+    # Normalise the ``type`` slot once. Unknown values fall back to
+    # ``password`` rendering so unforeseen app outputs still produce a
+    # useful mail rather than dropping silently.
+    raw_type = raw.get("type")
+    auth_type = raw_type if raw_type in ("password", "ssh_key", "oauth", "none") else "password"
+    auth_value = raw.get("auth")
+    # ``password`` field is kept for backwards-compatibility with any
+    # template path that still reads it directly; it is only populated
+    # for the password type so a missing value renders as None (templates
+    # check ``auth_type`` before pulling ``password``).
+    password = auth_value if auth_type == "password" else None
+    return {
+        "username": raw.get("username") or suffix,
+        "password": password,
+        "ip": raw.get("ip"),
+        "port": raw.get("port"),
+        "auth_type": auth_type,
+        # ``auth_value`` carries the raw credential regardless of type —
+        # templates use it together with ``auth_type`` to decide WHERE to
+        # show it (password field, SSH-key block, OAuth login link, ...).
+        "auth_value": auth_value,
+        # Convenience fallback so the user-mail can show a URL even when
+        # the per-user output doesn't carry one — use the team VM's URL.
+        "url": (_vm_for_team(outputs, team_name) or {}).get("url"),
+    }
+
 
 
 # ----------------------------------------------------------------------------
@@ -200,8 +295,10 @@ def _access_for_user(
 
 
 def _team_members(db: Session, team: Team) -> list[User]:
-    """Resolve team members via the join table, going through
-    ``crud_deployments`` to keep the join logic centralised."""
+    """Resolve team members via the join table. ``Team.user_to_teams``
+    is the relationship; we go through ``crud_deployments`` so the
+    join logic stays centralised (and works regardless of session
+    state)."""
     return crud_deployments.get_team_members(db, team.teamId)
 
 
@@ -215,10 +312,23 @@ def _send_user_mail(
     app: App,
     access: dict[str, Any],
 ) -> None:
-    # Re-pull from Keycloak immediately before composing the mail so
-    # the recipient reflects the current upstream address; best-effort
-    # (falls back to the DB row when KC is unreachable). Done in the
-    # sender so both the notify and resend call sites stay honest.
+    # Re-pull from Keycloak immediately before composing the mail.
+    # The DB row may have been written minutes (or longer) ago when
+    # the wizard picker first stored the membership; meanwhile the
+    # user might have changed their address upstream. Refreshing here
+    # keeps the recipient honest. ``refresh_user_from_keycloak`` is
+    # best-effort: if KC is unreachable the helper logs and returns
+    # the DB row, so the mail still goes out to the last-known-good
+    # address rather than failing entirely.
+    #
+    # The notify caller already pre-refreshed every team member to
+    # keep the ``teammates`` list consistent. We refresh the recipient
+    # once more here because this helper is also called from the
+    # ``resend_user_access`` path, which doesn't run that pre-loop —
+    # making the refresh a property of the sender keeps both call
+    # sites honest. The extra KC hit on the notify path is one
+    # roundtrip per user mail, which is negligible compared to the
+    # SMTP work that follows.
     user = refresh_user_from_keycloak(db, user)
     ctx = {
         "user": user,
@@ -253,7 +363,9 @@ def _send_owner_mail(
     app: App,
     teams_payload: list[dict[str, Any]],
 ) -> None:
-    # Same refresh contract as ``_send_user_mail`` for the owner.
+    # Same refresh contract as ``_send_user_mail`` — the owner of a
+    # deployment is also a Keycloak user whose address may have
+    # changed since the deployment was created.
     owner = refresh_user_from_keycloak(db, owner)
     ctx = {
         "owner": owner,
@@ -280,12 +392,13 @@ def notify_deployment_succeeded(
     deployment_id: UUID,
     terraform_outputs: dict[str, Any] | None,
 ) -> None:
-    """Entry point — call from the celery event listener after a
-    successful DEPLOY task.
+    """Top-level entry point — call from the celery event listener
+    after a successful DEPLOY task.
 
-    Loads the deployment with relations, walks its teams, and sends one
-    mail per user plus one summary mail to the owner. No-op when the
-    deployment is missing or the outputs are empty.
+    Loads the deployment with all relations, walks its teams, and
+    sends one mail per user plus one summary mail to the owner.
+    Silent no-op when the deployment is missing or the outputs are
+    empty (e.g. a deploy that produced no resources to credential).
     """
     deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
     if not deployment:
@@ -313,15 +426,22 @@ def notify_deployment_succeeded(
     for team in deployment.teams or []:
         members = _team_members(db, team)
         # Refresh every team member from Keycloak up front so the
-        # teammates section and owner summary reflect current records,
-        # and to avoid N redundant KC roundtrips in ``_send_user_mail``.
+        # teammates section in each per-user mail and the owner
+        # summary's member list both reflect the current upstream
+        # records, not whatever was on file when the deployment was
+        # created. ``_send_user_mail`` does its own refresh of the
+        # specific recipient too, but doing it once here keeps the
+        # ``teammates`` rendering consistent and avoids N redundant
+        # KC roundtrips per user mail.
         members = [refresh_user_from_keycloak(db, m) for m in members]
         member_payload: list[dict[str, Any]] = []
         for member in members:
             access = _access_for_user(terraform_outputs, team.name, member)
             if access is None:
-                # No credential output for this user — include them in
-                # the owner summary but skip the per-user mail.
+                # No credential output for this user — still include
+                # them in the owner summary so the owner sees who's on
+                # the team, but skip the per-user mail (no useful
+                # content to send).
                 member_payload.append({
                     "user": member,
                     "display_name": _display_name(member),
@@ -397,14 +517,24 @@ def resend_user_access(
 ) -> bool:
     """Re-send the access mail for one specific user of a deployment.
 
-    Loads the latest successful DEPLOY task to recover the original
-    ``terraform_outputs`` (which carry the credentials) and sends the
-    same per-user mail to that user only.
+    Loads the deployment's latest successful DEPLOY task to recover
+    the original ``terraform_outputs`` (those carry the user-specific
+    credentials), then sends the same per-user mail
+    ``notify_deployment_succeeded`` would have sent — to that user
+    only. Used by the "Resend access" button in the Teams card on the
+    deployment detail page.
 
-    Raises ``ResendError`` when the deployment/task is missing, the team
-    or user isn't part of the deployment, or no credential was produced.
-    Returns ``True`` on successful SMTP handover, ``False`` if SMTP
-    rejected the mail.
+    Raises ``ResendError`` with a structured reason when:
+
+    * the deployment doesn't exist or has no successful deploy task
+      (nothing to resend yet)
+    * the team or the user isn't part of this deployment (caller
+      shouldn't have asked, but defend in depth)
+    * the deploy didn't produce a credential for this user (template
+      doesn't issue per-user accounts, or the matcher missed)
+
+    Returns ``True`` on a successful SMTP handover, ``False`` if the
+    mail was sent but SMTP rejected it (logged inside ``send_email``).
     """
     deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
     if not deployment:
@@ -426,25 +556,15 @@ def resend_user_access(
     if user is None:
         raise ResendError("user_not_in_team")
 
-    # Most recent successful DEPLOY task; its ``outputs`` is the same
-    # JSON the original notify ran against.
-    last_deploy = (
-        db.query(Task)
-        .filter(
-            Task.deploymentId == deployment_id,
-            Task.type == TaskType.DEPLOY,
-            Task.status == TaskStatus.SUCCESS,
-        )
-        .order_by(Task.created_at.desc())
-        .first()
+    # Pull the most recent successful DEPLOY task's outputs — the same
+    # JSON the original notify ran against. The crud helper filters to
+    # DEPLOY + SUCCESS and returns None for missing/unparseable outputs;
+    # both collapse to "nothing to resend yet" (409 at the router).
+    outputs = crud_deployments.get_latest_successful_deploy_outputs(
+        db, deployment_id
     )
-    if not last_deploy or not last_deploy.outputs:
+    if outputs is None:
         raise ResendError("no_successful_deploy")
-
-    try:
-        outputs = json.loads(last_deploy.outputs) if isinstance(last_deploy.outputs, str) else last_deploy.outputs
-    except json.JSONDecodeError:
-        raise ResendError("outputs_unreadable")
 
     access = _access_for_user(outputs, team.name, user)
     if access is None:
@@ -467,3 +587,77 @@ def resend_user_access(
             user.email, deployment_id, e,
         )
         return False
+
+
+# ----------------------------------------------------------------------------
+# Per-member self-access lookup (read-only)
+# ----------------------------------------------------------------------------
+
+
+def get_user_access(
+    db: Session,
+    deployment_id: UUID,
+    user_id: UUID,
+) -> dict[str, Any] | None:
+    """Return the terraform output slices a single member is allowed to see.
+
+    Powers the ``GET /deployments/{id}/my-access`` endpoint: a team member
+    (typically a student) may retrieve THEIR OWN access credentials without
+    the owner-view that gates the full ``outputs`` payload. Only the caller's
+    own account entry is ever returned — teammates' credentials are never
+    included.
+
+    The result mirrors the raw terraform ``user_accounts`` / ``team_vms``
+    output shape (one key each: the member's account and their team's VM)
+    so the frontend's existing account-matching pipeline consumes it
+    unchanged:
+
+        {"user_accounts": {"<key>": {...}}, "team_vms": {"<team>": {...}}}
+
+    Returns ``None`` when the deployment is missing, the user isn't part of
+    any of its teams, there's no successful deploy yet, or the deploy issued
+    no per-user credential for this user. The router maps ``None`` onto an
+    empty-map 200 response so the UI can render a clean "no credentials yet"
+    state instead of an error.
+    """
+    deployment = crud_deployments.get_deployment_with_details(db, deployment_id)
+    if not deployment:
+        return None
+
+    # Find which team of this deployment the user belongs to. We need the
+    # Team (for its name, the account-key prefix) and the User object (its
+    # identifiers drive the fuzzy account match). Mirrors the team/user
+    # resolution in ``resend_user_access``.
+    matched_team: Team | None = None
+    matched_user: User | None = None
+    for team in deployment.teams or []:
+        members = crud_deployments.get_team_members(db, team.teamId)
+        member = next((m for m in members if m.userId == user_id), None)
+        if member is not None:
+            matched_team = team
+            matched_user = member
+            break
+    if matched_team is None or matched_user is None:
+        return None
+
+    outputs = crud_deployments.get_latest_successful_deploy_outputs(
+        db, deployment_id
+    )
+    if outputs is None:
+        return None
+
+    match = _find_account_for_user(outputs, matched_team.name, matched_user)
+    if match is None:
+        return None
+
+    key, raw = match
+    # Return the RAW account entry keyed by its ORIGINAL output key so the
+    # frontend's ``enrichedTeams`` matching (which derives the same key
+    # from team + email) resolves it exactly as it does for the owner-view
+    # ``user_accounts`` map. Include only the caller's own team VM block.
+    result: dict[str, Any] = {"user_accounts": {key: raw}, "team_vms": {}}
+    team_vm = _team_vms(outputs).get(matched_team.name)
+    if isinstance(team_vm, dict):
+        result["team_vms"][matched_team.name] = team_vm
+    return result
+

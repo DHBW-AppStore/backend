@@ -31,6 +31,7 @@ from app.schemas import (
     DeploymentResponse,
     DeploymentTeamMember,
     DeploymentTeamResponse,
+    MyAccessResponse,
     TaskSummary,
 )
 from app.services import deployment_notifier, email_service
@@ -45,6 +46,7 @@ from app.services.tf_state_parser import parse_tf_state
 from app.utils.capabilities import (
     can_view_deployment_owner,
     ensure_operate_deployment,
+    ensure_resend_access,
     ensure_view_app,
     ensure_view_deployment_owner,
     get_my_course_teacher_ids,
@@ -1783,6 +1785,55 @@ def download_deployment_file(
             ),
             "Content-Length": str(len(payload)),
         },
+    )
+
+
+# ----------------------------------------------------------------
+# GET OWN ACCESS CREDENTIALS (member self-service)
+# ----------------------------------------------------------------
+@router.get("/{deployment_id}/my-access", response_model=MyAccessResponse)
+def get_my_access(
+    deployment_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_keycloak),
+):
+    """Return the calling member's OWN access credentials for a deployment.
+
+    The full terraform ``outputs`` are owner-view-only (they carry every
+    teammate's credentials in one object). This endpoint is the member
+    counterpart: a team member — typically a student — retrieves only
+    THEIR OWN account, extracted server-side from the latest successful
+    deploy. Teammates' credentials are never included in the response.
+
+    Authorisation reuses :func:`ensure_resend_access` with the target set
+    to the caller themself, which collapses to the member-view gate
+    (owner, staff, team-member, or direct mapping). A caller with no
+    access to the deployment gets 403; the resend endpoint uses the same
+    gate for the self-resend button, so the two stay consistent.
+
+    Returns 200 with empty maps when there's no successful deploy yet or
+    the app issued no per-user credential for this user — the UI renders
+    a "no credentials yet" state rather than treating it as an error.
+    """
+    deployment = crud_deployments.get_deployment(db, deployment_id)
+    if not deployment:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Deployment not found",
+        )
+    # Self-target → member-view gate. Non-members get 403 here.
+    ensure_resend_access(current_user, deployment, current_user.userId, db)
+
+    access = deployment_notifier.get_user_access(
+        db, deployment_id, current_user.userId
+    )
+    if access is None:
+        # No successful deploy yet, user not in any team, or no per-user
+        # credential in the outputs — surface an empty (but valid) payload.
+        return MyAccessResponse()
+    return MyAccessResponse(
+        user_accounts=access.get("user_accounts", {}),
+        team_vms=access.get("team_vms", {}),
     )
 
 

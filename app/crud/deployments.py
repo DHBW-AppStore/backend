@@ -305,6 +305,40 @@ def get_deployment_outputs(db: Session, deployment_id: UUID) -> dict[str, Any] |
     return None
 
 
+def get_latest_successful_deploy_outputs(
+    db: Session, deployment_id: UUID
+) -> dict[str, Any] | None:
+    """Parsed Terraform outputs of the most recent *successful DEPLOY* task.
+
+    Stricter than :func:`get_deployment_outputs`, which returns the latest
+    task carrying any non-null ``outputs`` regardless of type or status — a
+    DESTROY task's (empty) outputs could win there. Credential extraction
+    must read the outputs of an actual successful deploy, so this helper
+    filters to ``type == DEPLOY`` and ``status == SUCCESS``.
+
+    Returns ``None`` when no such task exists or its ``outputs`` are absent
+    / unparseable. Shared by ``resend_user_access`` and the per-member
+    ``/my-access`` endpoint so both agree on which outputs are authoritative.
+    """
+    task = (
+        db.query(Task)
+        .filter(
+            Task.deploymentId == deployment_id,
+            Task.type == TaskType.DEPLOY,
+            Task.status == TaskStatus.SUCCESS,
+        )
+        .order_by(desc(Task.created_at))
+        .first()
+    )
+
+    if task and task.outputs:
+        try:
+            return json.loads(task.outputs) if isinstance(task.outputs, str) else task.outputs
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def get_deployments(
     db: Session,
     skip: int = 0,
