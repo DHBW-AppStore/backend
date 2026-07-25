@@ -49,16 +49,6 @@ def count_active_user_deployments(db: Session, user_id: UUID) -> int:
     )
 
 
-def has_active_user_deployment(db: Session, user_id: UUID) -> bool:
-    return (
-        db.query(Deployment.deploymentId)
-        .filter(Deployment.userId == user_id)
-        .filter(Deployment.deleted_at.is_(None))
-        .filter(~_is_destroyed_subq())
-        .first() is not None
-    )
-
-
 def get_deployment(
     db: Session,
     deployment_id: UUID,

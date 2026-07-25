@@ -3,10 +3,6 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # App
-    APP_NAME: str = "Backend API"
-    DEBUG: bool = False
-
     # Database
     DATABASE_URL: str
 

@@ -120,25 +120,3 @@ def dispatch_to_celery(
     db.refresh(task)
     logger.info("Task %s dispatched as celery task %s", task.taskId, result.id)
     return task, result.id
-
-
-class TaskService:
-    """Compatibility shim exposing the old ``register_new_task`` entry
-    point. New code should call `prepare_task_in_tx` +
-    `dispatch_to_celery` directly.
-    """
-
-    def register_new_task(
-        self,
-        db: Session,
-        deployment_id: uuid.UUID,
-        task_type: TaskType,
-        celery_task_name: str,
-        celery_args: list,
-    ):
-        task = prepare_task_in_tx(db, deployment_id, task_type)
-        db.commit()
-        return dispatch_to_celery(db, task, celery_task_name, celery_args)
-
-
-task_service = TaskService()

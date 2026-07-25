@@ -6,7 +6,6 @@ Provides a ``require_roles()`` FastAPI-dependency factory and the
 resource-level decisions live in :mod:`app.utils.capabilities`.
 """
 from collections.abc import Callable
-from functools import wraps
 
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -74,102 +73,6 @@ def require_roles(*roles: UserRole) -> Callable[..., User]:
 # Canonical aliases for requiring a role on router dependencies.
 require_admin = require_roles(UserRole.ADMIN)
 require_staff = require_roles(UserRole.TEACHER, UserRole.ADMIN)
-
-
-# ----------------------------------------------------------------
-# ROLE HELPERS
-# ----------------------------------------------------------------
-def get_current_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Require ADMIN role."""
-    if current_user.role != UserRole.ADMIN:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "role_required",
-                "required": [UserRole.ADMIN.value],
-            },
-        )
-    return current_user
-
-
-def get_current_teacher_or_admin(current_user: User = Depends(get_current_user)) -> User:
-    """Require TEACHER or ADMIN role."""
-    if current_user.role not in STAFF_ROLES:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "role_required",
-                "required": [r.value for r in STAFF_ROLES],
-            },
-        )
-    return current_user
-
-
-def get_current_student(current_user: User = Depends(get_current_user)) -> User:
-    """Require STUDENT role."""
-    if current_user.role != UserRole.STUDENT:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "code": "role_required",
-                "required": [UserRole.STUDENT.value],
-            },
-        )
-    return current_user
-
-
-def require_role(allowed_roles: list[UserRole]) -> Callable:
-    """Decorator enforcing a role allow-list.
-
-    Prefer ``Depends(require_roles(...))`` on the route signature —
-    decorators on FastAPI routes bypass the dependency injection system.
-    """
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            current_user = kwargs.get('current_user')
-            if not current_user:
-                raise HTTPException(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Not authenticated"
-                )
-
-            if current_user.role not in allowed_roles:
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "code": "role_required",
-                        "required": [r.value for r in allowed_roles],
-                    },
-                )
-
-            return await func(*args, **kwargs)
-        return wrapper
-    return decorator
-
-
-# ----------------------------------------------------------------
-# COURSE-LEVEL ACCESS
-# ----------------------------------------------------------------
-def check_course_access(course_id: str, current_user: User) -> bool:
-    """
-    Check if user has access to a course
-    Returns True if user is in the course or is ADMIN
-    """
-    if current_user.role == UserRole.ADMIN:
-        return True
-    return str(current_user.courseId) == str(course_id)
-
-
-def ensure_course_access(course_id: str, current_user: User):
-    """
-    Raise exception if user doesn't have access to course
-    """
-    if not check_course_access(course_id, current_user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have permission to access this course"
-        )
 
 
 # ----------------------------------------------------------------

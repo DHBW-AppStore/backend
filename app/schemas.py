@@ -50,10 +50,6 @@ class Token(BaseModel):
     token_type: str
 
 
-class TokenData(BaseModel):
-    username: str | None = None
-
-
 # ----------------------------------------------------------------
 # COURSE SCHEMAS
 # ----------------------------------------------------------------
@@ -479,13 +475,6 @@ class UserStatistics(BaseModel):
     successful_deployments: int
     failed_deployments: int
     pending_deployments: int
-
-
-class CourseStatistics(BaseModel):
-    total_students: int
-    total_teachers: int
-    total_apps: int
-    total_deployments: int
 
 
 # ----------------------------------------------------------------
