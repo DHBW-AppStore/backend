@@ -530,20 +530,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ================================================================
-  # 🚀 TRIGGER STAGING DEPLOY
-  # ================================================================
-  trigger-staging:
-    name: "🚀 Trigger Staging Deploy"
-    runs-on: ubuntu-latest
-    needs: [push]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-      - name: Trigger staging deployment
-        run: |
-          gh workflow run staging.yml \
-            --repo six7-click-n-deploy/deployment \
-            --ref main
-        env:
-          GH_TOKEN: ${{ secrets.DEPLOYMENT_PAT }}
+# Hier stand ein Job, der nach dem Push auf main den Staging-Deploy angestoßen
+# hat. Er ist entfallen, als der Deploy in unser eigenes Forgejo umgezogen ist
+# (deployment/docs/staging-setup.md), und zwar bewusst und nicht nur, weil sein
+# Secret hier fehlt:
+#
+# Ihn auf Forgejo umzubiegen hieße, ein Forgejo-Token als GitHub-Secret zu
+# hinterlegen — also ein Zugangsdatum, mit dem sich von einem öffentlichen
+# Repository aus unser Deploy auslösen lässt. Genau diese Kopplung soll es nicht
+# geben; deshalb baut diese CI nur das Image, und das Ausrollen beginnt auf der
+# anderen Seite.
+#
+# Der Preis dafür ist der verlorene Automatismus: ein Merge nach main rollt
+# nichts mehr aus, das geschieht in Forgejo von Hand. Wer ihn zurückholen will,
+# baut den Auslöser dort, nicht hier.
