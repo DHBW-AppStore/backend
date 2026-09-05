@@ -84,6 +84,18 @@ WORKDIR $APP_HOME
 # Copy virtual environment from builder
 COPY --from=builder /build/.venv /app/.venv
 
+# Drop pip from both interpreters. It ships a CycloneDX SBOM of its vendored
+# libraries at `pip/_vendor/bom.cdx.json`, and Trivy reads that as if those
+# libraries were installed — reporting msgpack and setuptools versions that
+# exist only inside pip and are never executed. Upgrading pip does not help;
+# those are the versions current pip vendors.
+#
+# A runtime image installs nothing, so this removes the code rather than
+# silencing the report. Both paths are spelled out because PATH puts the venv
+# first, so a bare `python` would only ever reach one of the two.
+RUN /app/.venv/bin/python -m pip uninstall -y pip && \
+    /usr/local/bin/python -m pip uninstall -y pip
+
 # Copy application code
 COPY --chown=appuser:appuser . .
 
