@@ -13,6 +13,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from ..config import settings
+from . import github_app
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,18 @@ class GitService:
         session.mount("https://", adapter)
         return session
 
+    def _uses_github_app(self, parsed: dict[str, str]) -> bool:
+        return parsed['host'] == 'github.com' and github_app.is_configured()
+
+    def _resolve_token(self, parsed: dict[str, str]) -> tuple[str, str]:
+        """Return ``(token, clone_user)``: the App token if installed, else GIT_ACCESS_TOKEN."""
+        if self._uses_github_app(parsed):
+            token = github_app.installation_token(parsed['owner'], parsed['repo'])
+            if token:
+                # Installation tokens only work with this fixed username.
+                return token, 'x-access-token'
+        return self.token, ''
+
     def _get_authenticated_url(self, git_url: str) -> str:
         """Convert Git URL to HTTPS format with token authentication."""
         url = git_url
@@ -61,9 +74,11 @@ class GitService:
         if '@' in url:
             url = url.split('@', 1)[1]
 
-        if self.token:
-            return f"https://{self.token}@{url}"
-        return f"https://{url}"
+        parsed = self._parse_git_url(f"https://{url}")
+        token, user = self._resolve_token(parsed) if parsed else (self.token, '')
+        if not token:
+            return f"https://{url}"
+        return f"https://{user}:{token}@{url}" if user else f"https://{token}@{url}"
 
     def _parse_git_url(self, git_url: str) -> dict[str, str] | None:
         """Parse Git URL and extract components."""
@@ -82,7 +97,14 @@ class GitService:
         logger.warning(f"Could not parse git URL: {git_url}")
         return None
 
-    def _request_tags(self, parsed: dict[str, str]) -> requests.Response:
+    @staticmethod
+    def _github_headers(token: str) -> dict[str, str]:
+        headers = {'Accept': 'application/vnd.github.v3+json'}
+        if token:
+            headers['Authorization'] = f"token {token}"
+        return headers
+
+    def _request_tags(self, parsed: dict[str, str], token: str) -> requests.Response:
         """Build and perform the tags request for the parsed repository.
 
         Constructs the provider-specific tags URL and headers (GitHub vs.
@@ -91,20 +113,17 @@ class GitService:
         """
         if parsed['platform'] == 'github':
             api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/tags"
-            headers = {
-                'Authorization': f"token {self.token}",
-                'Accept': 'application/vnd.github.v3+json',
-            }
+            headers = self._github_headers(token)
         else:  # gitlab
             project_path = quote(f"{parsed['owner']}/{parsed['repo']}", safe='')
             api_url = f"https://{parsed['host']}/api/v4/projects/{project_path}/repository/tags"
-            headers = {'PRIVATE-TOKEN': self.token}
+            headers = {'PRIVATE-TOKEN': token}
 
         return self._session.get(api_url, headers=headers, timeout=10)
 
-    def _fetch_github_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
+    def _fetch_github_tags(self, parsed: dict[str, str], token: str) -> list[dict[str, Any]]:
         """Fetch all tags from GitHub API."""
-        response = self._request_tags(parsed)
+        response = self._request_tags(parsed, token)
 
         if response.status_code == 404:
             return []
@@ -112,14 +131,12 @@ class GitService:
         response.raise_for_status()
         return [{'version': tag['name'], 'commit': tag['commit']['sha'][:8], 'type': 'tag'} for tag in response.json()]
 
-    def _fetch_github_releases(self, parsed: dict[str, str]) -> dict[str, dict[str, Any]]:
+    def _fetch_github_releases(
+        self, parsed: dict[str, str], token: str
+    ) -> dict[str, dict[str, Any]]:
         """Fetch releases from GitHub API."""
         api_url = f"https://api.github.com/repos/{parsed['owner']}/{parsed['repo']}/releases"
-        response = self._session.get(
-            api_url,
-            headers={'Authorization': f"token {self.token}", 'Accept': 'application/vnd.github.v3+json'},
-            timeout=10
-        )
+        response = self._session.get(api_url, headers=self._github_headers(token), timeout=10)
 
         if response.status_code == 404:
             return {}
@@ -139,7 +156,7 @@ class GitService:
 
     def _fetch_gitlab_tags(self, parsed: dict[str, str]) -> list[dict[str, Any]]:
         """Fetch all tags from GitLab API."""
-        response = self._request_tags(parsed)
+        response = self._request_tags(parsed, self.token)
 
         if response.status_code == 404:
             return []
@@ -287,7 +304,10 @@ class GitService:
                     'message': f"Unable to parse repository URL or unsupported platform. Supported: GitHub, GitLab. URL: {git_url}"
                 }
 
-            if not self.token:
+            token, _ = self._resolve_token(parsed)
+
+            # GitHub answers public repos anonymously; GitLab needs a token.
+            if not token and parsed['platform'] != 'github':
                 return {
                     'success': False,
                     'message': "Git access token is not configured. Please contact the administrator."
@@ -296,7 +316,7 @@ class GitService:
             # Try to fetch tags to verify access
             logger.info(f"Verifying access to {git_url} via {parsed['platform'].upper()} API")
 
-            response = self._request_tags(parsed)
+            response = self._request_tags(parsed, token)
 
             if response.status_code == 401:
                 return {
@@ -304,6 +324,21 @@ class GitService:
                     'message': "Authentication failed. The Git access token is invalid or expired."
                 }
             elif response.status_code == 403 or response.status_code == 404:
+                repo_name = f"{parsed['owner']}/{parsed['repo']}"
+                if self._uses_github_app(parsed):
+                    return {
+                        'success': False,
+                        'message': (
+                            f"The platform cannot read {repo_name}. Install its GitHub App "
+                            f"on the repository: {github_app.install_url()}"
+                        ),
+                    }
+                if not token:
+                    return {
+                        'success': False,
+                        'message': f"Repository {repo_name} not found or not public."
+                    }
+
                 # Try to accept invitation automatically
                 logger.info(f"Access denied, attempting to accept invitation for {git_url}")
 
@@ -317,7 +352,7 @@ class GitService:
 
                 # Retry access check after accepting invitation
                 logger.info(f"Invitation accepted, retrying access check for {git_url}")
-                retry_response = self._request_tags(parsed)
+                retry_response = self._request_tags(parsed, token)
 
                 if retry_response.status_code >= 400:
                     return {
@@ -403,15 +438,17 @@ class GitService:
         if not parsed or parsed['platform'] == 'unknown':
             raise Exception(f"Unable to parse URL or unsupported platform: {git_url}")
 
-        if not self.token:
+        if not self.token and parsed['platform'] != 'github':
             raise Exception("Git access token not configured")
 
         try:
             logger.info(f"Fetching versions from {parsed['platform'].upper()} API")
 
             if parsed['platform'] == 'github':
-                versions = self._fetch_github_tags(parsed)
-                releases = self._fetch_github_releases(parsed)
+                # One token for both calls, rather than minting a new one per request.
+                token, _ = self._resolve_token(parsed)
+                versions = self._fetch_github_tags(parsed, token)
+                releases = self._fetch_github_releases(parsed, token)
             else:  # gitlab
                 versions = self._fetch_gitlab_tags(parsed)
                 releases = self._fetch_gitlab_releases(parsed)

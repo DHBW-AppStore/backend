@@ -192,3 +192,99 @@ def test_clone_repository_authentication_failure_propagates(
     # Original cause ist via __cause__ erreichbar (raise ... from e)
     assert excinfo.value.__cause__ is auth_error
     assert "Authentication failed" in str(excinfo.value.__cause__)
+
+
+# ----------------------------------------------------------------
+# GitHub App
+# ----------------------------------------------------------------
+def _response(status: int, body=None) -> MagicMock:
+    resp = MagicMock(status_code=status)
+    resp.json.return_value = body if body is not None else []
+    return resp
+
+
+@patch("app.services.git_service.github_app")
+def test_clone_url_uses_installation_token(mock_app, tmp_path, monkeypatch):
+    """Ist die App installiert, trägt die URL den festen Nutzer ``x-access-token``."""
+    mock_app.is_configured.return_value = True
+    mock_app.installation_token.return_value = "ghs_abc"
+    svc = _service(tmp_path, monkeypatch)
+
+    url = svc._get_authenticated_url("git@github.com:acme/widgets.git")
+
+    assert url == "https://x-access-token:ghs_abc@github.com/acme/widgets.git"
+
+
+@patch("app.services.git_service.github_app")
+def test_clone_url_falls_back_to_token_when_app_not_installed(mock_app, tmp_path, monkeypatch):
+    """Ohne Installation bleibt es beim bisherigen ``GIT_ACCESS_TOKEN``."""
+    mock_app.is_configured.return_value = True
+    mock_app.installation_token.return_value = None
+    svc = _service(tmp_path, monkeypatch)
+
+    url = svc._get_authenticated_url("https://github.com/acme/widgets.git")
+
+    assert url == "https://test-token-xyz@github.com/acme/widgets.git"
+
+
+@patch("app.services.git_service.github_app")
+def test_other_hosts_never_ask_the_app(mock_app, tmp_path, monkeypatch):
+    mock_app.is_configured.return_value = True
+    svc = _service(tmp_path, monkeypatch)
+
+    url = svc._get_authenticated_url("https://gitlab.com/group/project.git")
+
+    assert url == "https://test-token-xyz@gitlab.com/group/project.git"
+    mock_app.installation_token.assert_not_called()
+
+
+@patch("app.services.git_service.github_app")
+def test_versions_use_one_token_for_tags_and_releases(mock_app, tmp_path, monkeypatch):
+    """Tags und Releases teilen sich einen Token, statt zwei zu erzeugen."""
+    mock_app.is_configured.return_value = True
+    mock_app.installation_token.return_value = "ghs_abc"
+    svc = _service(tmp_path, monkeypatch)
+    tags = [{"name": "v1.0.0", "commit": {"sha": "0123456789abcdef"}}]
+    get = MagicMock(side_effect=[_response(200, tags), _response(200, [])])
+    monkeypatch.setattr(svc._session, "get", get)
+
+    versions = svc.get_versions("https://github.com/acme/widgets")
+
+    assert [v["version"] for v in versions] == ["v1.0.0"]
+    mock_app.installation_token.assert_called_once_with("acme", "widgets")
+    for call in get.call_args_list:
+        assert call.kwargs["headers"]["Authorization"] == "token ghs_abc"
+
+
+@patch("app.services.git_service.github_app")
+def test_verify_points_to_install_page_when_app_cannot_read(mock_app, tmp_path, monkeypatch):
+    """Mit App ersetzt der Installationslink das Annehmen einer Einladung."""
+    mock_app.is_configured.return_value = True
+    mock_app.installation_token.return_value = None
+    mock_app.install_url.return_value = "https://github.com/apps/x/installations/new"
+    svc = _service(tmp_path, monkeypatch)
+    monkeypatch.setattr(svc, "token", "")
+    monkeypatch.setattr(svc._session, "get", MagicMock(return_value=_response(404)))
+    accept = MagicMock()
+    monkeypatch.setattr(svc, "_accept_github_invite", accept)
+
+    result = svc.verify_repository_access("https://github.com/acme/private")
+
+    assert result["success"] is False
+    assert "https://github.com/apps/x/installations/new" in result["message"]
+    accept.assert_not_called()
+
+
+@patch("app.services.git_service.github_app")
+def test_verify_public_repo_needs_no_credentials(mock_app, tmp_path, monkeypatch):
+    """Öffentliche GitHub-Repos gehen auch ohne Token und ohne App durch."""
+    mock_app.is_configured.return_value = False
+    svc = _service(tmp_path, monkeypatch)
+    monkeypatch.setattr(svc, "token", "")
+    get = MagicMock(return_value=_response(200))
+    monkeypatch.setattr(svc._session, "get", get)
+
+    result = svc.verify_repository_access("https://github.com/acme/public")
+
+    assert result["success"] is True
+    assert "Authorization" not in get.call_args.kwargs["headers"]
