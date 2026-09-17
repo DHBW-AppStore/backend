@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     # Git
     TEMP_REPO_BASE_PATH: str = "/tmp/worker_repos"
     GIT_ACCESS_TOKEN: str = ""  # Token for HTTPS git authentication
+    # GitHub App; the private key is the PEM, base64-encoded to fit on one .env line.
+    GITHUB_APP_ID: str = ""
+    GITHUB_APP_PRIVATE_KEY: str = ""
 
     # Keycloak — single source of truth for authentication
     KEYCLOAK_SERVER_URL: str = "http://keycloak:8080"
