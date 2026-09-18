@@ -11,6 +11,7 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
+from app.routers import apps as apps_router
 from app.services import github_app
 
 pytestmark = pytest.mark.unit
@@ -93,6 +94,33 @@ def test_other_errors_are_raised(app_settings):
         pytest.raises(urllib.error.HTTPError),
     ):
         github_app.installation_token("owner", "repo")
+
+
+class TestEndpoint:
+    """``GET /apps/github-app`` — the wizard asks it for the install link."""
+
+    def test_returns_the_install_url(self):
+        with patch.object(apps_router, "github_app") as mock_app:
+            mock_app.is_configured.return_value = True
+            mock_app.install_url.return_value = "https://github.com/apps/x/installations/new"
+
+            assert apps_router.get_github_app().install_url == (
+                "https://github.com/apps/x/installations/new"
+            )
+
+    def test_returns_none_without_an_app(self):
+        with patch.object(apps_router, "github_app") as mock_app:
+            mock_app.is_configured.return_value = False
+
+            assert apps_router.get_github_app().install_url is None
+            mock_app.install_url.assert_not_called()
+
+    def test_a_broken_key_does_not_break_the_wizard(self):
+        with patch.object(apps_router, "github_app") as mock_app:
+            mock_app.is_configured.return_value = True
+            mock_app.install_url.side_effect = _http_error(401)
+
+            assert apps_router.get_github_app().install_url is None
 
 
 def test_install_url_comes_from_the_app_page(app_settings):
