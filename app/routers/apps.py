@@ -24,6 +24,7 @@ from app.schemas import (
     AppVersionApprovalSubmit,
     AppWithVersions,
 )
+from app.services import github_app
 from app.services.git_service import git_service
 from app.utils.app_image import build_image_data_url, parse_image_data_url
 from app.utils.capabilities import (
@@ -81,6 +82,12 @@ class _MarkerErrorPayload(BaseModel):
     message: str
     location: str
     code: str | None = None
+
+
+class GitHubAppInfo(BaseModel):
+    """Install page of this installation's GitHub App, or null when it has none."""
+
+    install_url: str | None = None
 
 
 class AppVariableResponse(BaseModel):
@@ -1330,6 +1337,29 @@ def list_apps(
     else:
         apps = crud_apps.get_visible_apps(db, current_user.userId, skip=skip, limit=limit)
     return [_serialize_app(a) for a in apps]
+
+
+# ----------------------------------------------------------------
+# GITHUB APP
+# ----------------------------------------------------------------
+# Must stay above /{app_id}, otherwise FastAPI reads "github-app" as a UUID.
+@router.get("/github-app", response_model=GitHubAppInfo)
+def get_github_app(
+    current_user: User = Depends(get_current_user_keycloak)
+):
+    """Where App authors install this installation's GitHub App.
+
+    Null when no App is configured; the wizard then falls back to explaining
+    that private repositories need one.
+    """
+    if not github_app.is_configured():
+        return GitHubAppInfo(install_url=None)
+    try:
+        return GitHubAppInfo(install_url=github_app.install_url())
+    except Exception as e:
+        # A broken key should not block the wizard, only the hint.
+        logger.warning(f"Could not read the GitHub App install URL: {e}")
+        return GitHubAppInfo(install_url=None)
 
 
 # ----------------------------------------------------------------
