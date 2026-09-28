@@ -22,6 +22,7 @@ from app.services.deployment_status import (
     LifecycleStates,
     NetworkAddress,
     _addresses_from,
+    _fetch_ports,
     _hardware_from,
     _lifecycle_from,
     _translate_power_state,
@@ -491,3 +492,31 @@ def test_addresses_without_metadata_infer_family_and_keep_unknown_address():
     assert [(ip.address, ip.version, ip.type) for ip in ips] == [
         ("2001:db8::10", 6, "fixed"), ("unrecognised", None, "fixed"),
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("addresses", [
+    [], [("192.0.2.10", 4, "v4")], [("2001:db8::10", 6, "v6")],
+    [("192.0.2.10", 4, "v4"), ("2001:db8::10", 6, "v6")],
+    [("2001:db8::10", 6, "v6"), ("192.0.2.10", 4, "v4"),
+     ("2001:db8:1::10", 6, "other-v6")],
+    [("unknown", None, None)],
+])
+def test_ports_preserve_all_addresses_and_subnets(addresses):
+    port = SimpleNamespace(id="port", fixed_ips=[
+        {"ip_address": addr, "subnet_id": subnet} for addr, _, subnet in addresses
+    ])
+    conn = SimpleNamespace(network=SimpleNamespace(ports=lambda **_kw: [port]))
+    row = _fetch_ports(conn, "vm")[0]
+    assert [(ip.address, ip.version, ip.subnet_id) for ip in row.fixed_ips] == addresses
+    assert row.fixed_ip == (addresses[0][0] if addresses else None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("entries", [None, "invalid", [None, {}, {"ip_address": ""}]])
+def test_ports_handle_missing_or_malformed_addresses(entries):
+    port = SimpleNamespace(id="port", fixed_ips=entries)
+    conn = SimpleNamespace(network=SimpleNamespace(ports=lambda **_kw: [port]))
+    row = _fetch_ports(conn, "vm")[0]
+    assert row.fixed_ips == []
+    assert row.fixed_ip is None

@@ -128,3 +128,7 @@ weiterhin die erste Fixed IP, `floating_ip` die letzte Floating IP. Diese
 Einzelfelder sind keine Empfehlung für die Erreichbarkeit oder IP-Version;
 Clients für Dual Stack verwenden die vollständige `ips`-Liste. Die Reihenfolge
 entspricht der OpenStack-Antwort. Fehlende oder leere Adressen werden ignoriert.
+
+Port-Details enthalten entsprechend `ports[].fixed_ips` mit `address`,
+`version` und `subnet_id` für jede Adresse. Das bestehende `ports[].fixed_ip`
+bleibt die erste gültige Adresse; `fixed_ips` ist bei Ports ohne Adressen leer.

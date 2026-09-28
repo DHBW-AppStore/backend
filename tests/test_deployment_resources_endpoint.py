@@ -299,7 +299,10 @@ def test_resource_detail_loads_stage2(
     port.network_id = "net-1"
     port.status = "ACTIVE"
     port.mac_address = "fa:16:00:00:00:01"
-    port.fixed_ips = [{"ip_address": "10.0.0.10", "subnet_id": "sn-1"}]
+    port.fixed_ips = [
+        {"ip_address": "10.0.0.10", "subnet_id": "sn-1"},
+        {"ip_address": "2001:db8::10", "subnet_id": "sn-6"},
+    ]
     port.security_group_ids = ["sg-1"]
     patched_user_connection.network.ports.return_value = iter([port])
 
@@ -339,6 +342,11 @@ def test_resource_detail_loads_stage2(
     assert body["hardware"]["image_name"] == "ubuntu-22.04"
     assert len(body["ports"]) == 1
     assert body["ports"][0]["status"] == "ACTIVE"
+    assert body["ports"][0]["fixed_ip"] == "10.0.0.10"
+    assert body["ports"][0]["fixed_ips"] == [
+        {"address": "10.0.0.10", "version": 4, "subnet_id": "sn-1"},
+        {"address": "2001:db8::10", "version": 6, "subnet_id": "sn-6"},
+    ]
     assert len(body["security_groups"]) == 1
     assert body["security_groups"][0]["ingress_rules"] == 2
     assert body["security_groups"][0]["egress_rules"] == 1
