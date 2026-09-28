@@ -114,3 +114,17 @@ app/
 
 - Architektur und projektübergreifende Doku: [.github-Repo](https://github.com/six7-click-n-deploy/.github)
 - Worker-Service: [worker-Repo](https://github.com/six7-click-n-deploy/worker)
+
+## IPv4-/IPv6-Adressen in der Ressourcen-API
+
+Die Ressourcen-Endpunkte liefern pro Netzwerk unter `addresses[].ips` alle
+von OpenStack gemeldeten Adressen. Jeder Eintrag enthält `address`, `version`
+(`4`, `6` oder `null` bei nicht erkennbarer Adresse), `type` und `mac`.
+Fehlender Adresstyp wird wie bisher als `fixed` behandelt. Die IP-Version
+wird aus der Adresse bestimmt, auch wenn OpenStack keine Version mitsendet.
+
+Die bisherigen Felder bleiben zur Kompatibilität erhalten: `fixed_ip` enthält
+weiterhin die erste Fixed IP, `floating_ip` die letzte Floating IP. Diese
+Einzelfelder sind keine Empfehlung für die Erreichbarkeit oder IP-Version;
+Clients für Dual Stack verwenden die vollständige `ips`-Liste. Die Reihenfolge
+entspricht der OpenStack-Antwort. Fehlende oder leere Adressen werden ignoriert.

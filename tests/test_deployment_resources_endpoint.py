@@ -441,3 +441,24 @@ def test_redeploy_rejects_unknown_address(
     assert response.status_code == 404
     assert response.json()["detail"]["reason"] == "resource_not_in_state"
     assert not patched_celery_send.called
+
+
+@pytest.mark.integration
+def test_list_resources_preserves_dual_stack_addresses(
+    client, db, mock_user, patched_user_connection
+):
+    _ensure_user_credentials(db, mock_user)
+    deployment = _seed_deployment_with_state(db, mock_user, _ensure_app(db, mock_user))
+    server = _make_server_mock(server_id="uuid-vm-a")
+    server.addresses["shared-net"].append({"addr": "2001:db8::10", "version": 6})
+    patched_user_connection.compute.find_server.return_value = server
+    response = client.get(f"/deployments/{deployment.deploymentId}/resources")
+    assert response.status_code == 200
+    vm = next(r for r in response.json()["resources"] if r["category"] == "instance")
+    network = vm["addresses"][0]
+    assert network["fixed_ip"] == "10.0.0.10"
+    assert network["floating_ip"] == "10.0.0.20"
+    assert [(ip["address"], ip["version"], ip["type"]) for ip in network["ips"]] == [
+        ("10.0.0.10", 4, "fixed"), ("10.0.0.20", 4, "floating"),
+        ("2001:db8::10", 6, "fixed"),
+    ]
