@@ -132,3 +132,17 @@ entspricht der OpenStack-Antwort. Fehlende oder leere Adressen werden ignoriert.
 Port-Details enthalten entsprechend `ports[].fixed_ips` mit `address`,
 `version` und `subnet_id` für jede Adresse. Das bestehende `ports[].fixed_ip`
 bleibt die erste gültige Adresse; `fixed_ips` ist bei Ports ohne Adressen leer.
+
+### Adressen in Terraform-Zugangsoutputs
+
+`team_vms.value[team]` und `user_accounts.value[account]` können zusätzlich
+`ips: list(string)` enthalten, z. B. `["192.0.2.10", "2001:db8::10"]`.
+Die Benachrichtigungen übernehmen diese Adressen zusätzlich zu den bisherigen
+`floating_ip`/`fixed_ip` beziehungsweise `ip` (ohne Duplikate). Alte Outputs
+bleiben gültig. Ein Account-`port` gilt für alle seine Adressen. IPv6 mit Port
+wird als `[2001:db8::10]:8080` dargestellt; reine Adressen bleiben unverändert.
+
+Die Vorlagen legen mit `ip` und `url` weiterhin den bevorzugten Zugang fest;
+das Backend wählt nicht automatisch eine IP-Familie aus. Fertige URLs werden
+unverändert übernommen und müssen bei IPv6-Literalen bereits korrekt
+geklammert sein, z. B. `http://[2001:db8::10]:8080`.

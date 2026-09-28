@@ -36,6 +36,7 @@ import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +69,23 @@ _jinja_text = Environment(
     lstrip_blocks=False,
     keep_trailing_newline=True,
 )
+
+
+def format_endpoint(host: str, port: int | str | None = None) -> str:
+    """Format a host and optional port without ambiguity for IPv6."""
+    if port is None or port == "":
+        return host
+    bare_host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    try:
+        if ip_address(bare_host).version == 6:
+            host = f"[{bare_host}]"
+    except ValueError:
+        pass  # DNS names are valid hosts too.
+    return f"{host}:{port}"
+
+
+_jinja_html.filters["endpoint"] = format_endpoint
+_jinja_text.filters["endpoint"] = format_endpoint
 
 
 def render(template_name: str, **context: Any) -> str:

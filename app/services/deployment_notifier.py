@@ -136,6 +136,15 @@ def _user_accounts(outputs: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     return val if isinstance(val, dict) else {}
 
 
+def _output_ips(raw: dict[str, Any], *legacy_keys: str) -> list[str]:
+    """Accept optional output ``ips: list[str]`` and retain legacy addresses."""
+    values = [raw.get(key) for key in legacy_keys]
+    extra = raw.get("ips")
+    if isinstance(extra, list):
+        values.extend(extra)
+    return list(dict.fromkeys(value for value in values if isinstance(value, str) and value))
+
+
 def _vm_for_team(outputs: dict[str, Any] | None, team_name: str) -> dict[str, Any] | None:
     """Pick the VM block for one team, normalised to the keys the
     template expects (``url``, ``floating_ip``, ``fixed_ip``,
@@ -150,6 +159,7 @@ def _vm_for_team(outputs: dict[str, Any] | None, team_name: str) -> dict[str, An
         "url": raw.get("code_server_url") or raw.get("url"),
         "floating_ip": raw.get("floating_ip"),
         "fixed_ip": raw.get("fixed_ip"),
+        "ips": _output_ips(raw, "floating_ip", "fixed_ip"),
         "instance_name": raw.get("instance_name"),
     }
 
@@ -276,6 +286,7 @@ def _access_for_user(
         "username": raw.get("username") or suffix,
         "password": password,
         "ip": raw.get("ip"),
+        "ips": _output_ips(raw, "ip"),
         "port": raw.get("port"),
         "auth_type": auth_type,
         # ``auth_value`` carries the raw credential regardless of type —
@@ -660,4 +671,3 @@ def get_user_access(
     if isinstance(team_vm, dict):
         result["team_vms"][matched_team.name] = team_vm
     return result
-

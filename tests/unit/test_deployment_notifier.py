@@ -350,3 +350,84 @@ def test_notify_handles_smtp_failure_gracefully():
     # All three mails were attempted even though every one of them
     # raised: 2 per-user mails + 1 owner summary.
     assert m_send.call_count == 3
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("suffix", ["html", "txt"])
+@pytest.mark.parametrize("host,port,expected", [
+    ("192.0.2.10", 8080, "192.0.2.10:8080"),
+    ("2001:db8::10", 8080, "[2001:db8::10]:8080"),
+    ("[2001:db8::10]", 8080, "[2001:db8::10]:8080"),
+    ("2001:db8::10", None, "2001:db8::10"),
+    ("app.example", 443, "app.example:443"),
+])
+def test_access_output_renders_unambiguous_endpoint(suffix, host, port, expected):
+    user = _make_user(username="alice", email="alice@example.com")
+    outputs = _terraform_outputs_for("Team-1", user)
+    outputs["user_accounts"]["value"]["Team-1-alice"].update(ip=host, port=port)
+    access = deployment_notifier._access_for_user(outputs, "Team-1", user)
+    body = deployment_notifier.email_service.render(
+        f"user_invite.{suffix}",
+        deployment={"name": "demo", "app_name": "app"},
+        user=user, access=access, teammates=[],
+    )
+    assert expected in body
+    assert "http://1.2.3.4:8080" in body
+    assert "s3cret" in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("suffix", ["html", "txt"])
+def test_dual_stack_outputs_reach_user_and_owner_templates(suffix):
+    user = _make_user(username="alice", email="alice@example.com")
+    outputs = _terraform_outputs_for("Team-1", user)
+    outputs["team_vms"]["value"]["Team-1"]["ips"] = ["2001:db8::10", "1.2.3.4"]
+    outputs["user_accounts"]["value"]["Team-1-alice"]["ips"] = [
+        "2001:db8::10", "1.2.3.4", None, {}, "",
+    ]
+    access = deployment_notifier._access_for_user(outputs, "Team-1", user)
+    vm = deployment_notifier._vm_for_team(outputs, "Team-1")
+    assert access["ip"] == "1.2.3.4"
+    assert access["ips"] == ["1.2.3.4", "2001:db8::10"]
+    assert vm["ips"] == ["1.2.3.4", "10.0.0.5", "2001:db8::10"]
+    body = deployment_notifier.email_service.render(
+        f"user_invite.{suffix}", deployment={"name": "demo"},
+        user=user, access=access, teammates=[],
+    )
+    assert "[2001:db8::10]:8080" in body
+    assert "1.2.3.4:8080" in body
+    summary = deployment_notifier.email_service.render(
+        f"owner_summary.{suffix}", deployment={"name": "demo"},
+        teams=[{"name": "Team-1", "vm": vm, "members": []}],
+    )
+    assert "2001:db8::10" in summary
+    assert "10.0.0.5" in summary
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("extra", [None, "2001:db8::10", {}])
+def test_invalid_optional_ips_keep_legacy_access(extra):
+    assert deployment_notifier._output_ips({"ip": "192.0.2.10", "ips": extra}, "ip") == [
+        "192.0.2.10"
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("suffix", ["html", "txt"])
+def test_ipv6_only_output_without_legacy_ip(suffix):
+    user = _make_user(username="alice", email="alice@example.com")
+    outputs = _terraform_outputs_for("Team-1", user)
+    account = outputs["user_accounts"]["value"]["Team-1-alice"]
+    account.pop("ip")
+    account["ips"] = ["2001:db8::10"]
+    vm = outputs["team_vms"]["value"]["Team-1"]
+    vm["code_server_url"] = "http://[2001:db8::10]:8080"
+    vm.pop("floating_ip")
+    access = deployment_notifier._access_for_user(outputs, "Team-1", user)
+    assert access["ip"] is None
+    body = deployment_notifier.email_service.render(
+        f"user_invite.{suffix}", deployment={"name": "demo"},
+        user=user, access=access, teammates=[],
+    )
+    assert "[2001:db8::10]:8080" in body
+    assert "http://[2001:db8::10]:8080" in body

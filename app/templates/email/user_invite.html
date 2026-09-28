@@ -21,12 +21,12 @@
     <td><a href="{{ access.url }}">{{ access.url }}</a></td>
   </tr>
   {% endif %}
-  {% if access.ip %}
+  {% for ip in access.ips or ([access.ip] if access.ip else []) %}
   <tr>
     <td>IP</td>
-    <td><code>{{ access.ip }}</code>{% if access.port %}:<code>{{ access.port }}</code>{% endif %}</td>
+    <td><code>{{ ip | endpoint(access.port) }}</code></td>
   </tr>
-  {% endif %}
+  {% endfor %}
   <tr>
     <td>Username</td>
     <td><code>{{ access.username }}</code></td>

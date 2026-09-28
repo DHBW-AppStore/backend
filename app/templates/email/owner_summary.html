@@ -43,6 +43,12 @@
     <td><code>{{ team.vm.fixed_ip }}</code></td>
   </tr>
   {% endif %}
+  {% for ip in team.vm.ips if ip not in [team.vm.fixed_ip, team.vm.floating_ip] %}
+  <tr>
+    <td>IP</td>
+    <td><code>{{ ip }}</code></td>
+  </tr>
+  {% endfor %}
   {% if team.vm.instance_name %}
   <tr>
     <td>Instance</td>

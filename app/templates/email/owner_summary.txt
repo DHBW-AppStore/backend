@@ -19,6 +19,8 @@ TEAM — {{ team.name }}
 {% endif -%}
 {% if team.vm.fixed_ip %}Fixed IP:      {{ team.vm.fixed_ip }}
 {% endif -%}
+{% for ip in team.vm.ips if ip not in [team.vm.fixed_ip, team.vm.floating_ip] %}IP:            {{ ip }}
+{% endfor -%}
 {% if team.vm.instance_name %}Instance:      {{ team.vm.instance_name }}
 {% endif -%}
 {% endif -%}
