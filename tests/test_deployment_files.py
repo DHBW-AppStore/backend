@@ -328,7 +328,7 @@ def test_download_endpoint_member_403(
     # mapping, so we attach the student via UserToDeployment.
     from app.main import app as fastapi_app
     from app.models import UserToDeployment
-    from app.utils.keycloak_auth import get_current_user_keycloak
+    from app.utils.permissions import get_current_user as get_current_user_keycloak
 
     student = User(
         userId=uuid.uuid4(),

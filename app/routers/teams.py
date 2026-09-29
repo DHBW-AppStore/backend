@@ -7,7 +7,7 @@ from app.crud import teams as crud_teams
 from app.database import get_db
 from app.models import User
 from app.schemas import TeamCreate, TeamResponse, TeamUpdate, TeamWithMembers
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 from app.utils.permissions import require_staff
 
 router = APIRouter()

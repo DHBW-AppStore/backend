@@ -32,7 +32,7 @@ from app.utils.capabilities import (
     ensure_submit_app_version,
     ensure_view_app,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 
 logger = logging.getLogger(__name__)
 

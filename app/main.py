@@ -12,6 +12,7 @@ from app.routers import (
     admin_apps,
     apps,
     auth_keycloak,
+    auth_lti,
     courses,
     dashboard,
     deployments,
@@ -119,6 +120,7 @@ app.add_middleware(
 # ROUTERS
 # ----------------------------------------------------------------
 app.include_router(auth_keycloak.router, prefix="/auth", tags=["Authentication"])
+app.include_router(auth_lti.router, prefix="/lti", tags=["LTI"])
 app.include_router(users.router, prefix="/users", tags=["Users"])
 app.include_router(courses.router, prefix="/courses", tags=["Courses"])
 app.include_router(apps.router, prefix="/apps", tags=["Apps"])

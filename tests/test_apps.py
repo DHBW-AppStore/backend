@@ -8,7 +8,7 @@ from app.database import get_db
 from app.main import app as fastapi_app
 from app.models import User, UserRole
 from app.schemas import AppCreate
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 from tests.conftest import TestingSessionLocal
 
 

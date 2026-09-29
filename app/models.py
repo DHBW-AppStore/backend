@@ -68,6 +68,9 @@ class Course(Base):
 
     courseId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String, nullable=False)
+    # Moodle LTI context id (the "course" on the platform side). Used to
+    # find-or-create the matching Course row on an LTI launch.
+    lti_context_id = Column(String, unique=True, index=True, nullable=True)
 
     # Relationships
     users = relationship("User", back_populates="course")
@@ -90,6 +93,12 @@ class User(Base):
 
     userId = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     keycloak_id = Column(String, unique=True, index=True, nullable=True)  # Keycloak User ID (sub)
+    # LTI 1.3 identity (Moodle). ``sub`` is only unique per-issuer, so the
+    # two columns together are the identity key — never match on
+    # ``lti_sub`` alone. Both nullable: a user may have a Keycloak
+    # identity, an LTI identity, or (after email-linking) both.
+    lti_iss = Column(String, nullable=True)
+    lti_sub = Column(String, nullable=True)
     email = Column(String, unique=True, index=True, nullable=False)
     username = Column(String, nullable=False)
     firstName = Column(String, nullable=True)
@@ -97,6 +106,10 @@ class User(Base):
     role = Column(Enum(UserRole), nullable=False, default=UserRole.STUDENT)
     courseId = Column(UUID(as_uuid=True), ForeignKey("courses.courseId"), nullable=True, index=True)
     created_at = Column(DateTime, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("lti_iss", "lti_sub", name="uq_users_lti_identity"),
+    )
 
     # Relationships
     course = relationship("Course", back_populates="users")

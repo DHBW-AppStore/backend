@@ -11,9 +11,11 @@ from app.models import User, UserRole
 from app.schemas import UserResponse, UserStatistics, UserUpdate, UserWithCourse
 from app.utils.capabilities import ensure_change_user_role, ensure_view_user
 from app.utils.keycloak_auth import (
-    get_current_user_keycloak,
     get_keycloak_users_by_ids,
     search_keycloak_users,
+)
+from app.utils.permissions import (
+    get_current_user as get_current_user_keycloak,
 )
 from app.utils.permissions import (
     require_staff,

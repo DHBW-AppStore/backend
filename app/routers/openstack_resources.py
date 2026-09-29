@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.services import openstack_client
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 
 logger = logging.getLogger(__name__)
 

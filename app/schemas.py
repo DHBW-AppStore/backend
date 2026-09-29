@@ -32,6 +32,7 @@ class UserResponse(UserBase):
     role: UserRole
     courseId: UUID | None = None
     keycloak_id: str | None = None
+    lti_iss: str | None = None
     firstName: str | None = None
     lastName: str | None = None
     created_at: datetime
@@ -67,6 +68,7 @@ class CourseUpdate(BaseModel):
 
 class CourseResponse(CourseBase):
     courseId: UUID
+    lti_context_id: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

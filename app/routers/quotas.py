@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.crud import openstack_credentials as crud_creds
 from app.database import get_db
 from app.models import User
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 
 logger = logging.getLogger(__name__)
 

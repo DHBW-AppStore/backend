@@ -20,7 +20,7 @@ from app.schemas import (
     OpenStackCredentialUpsert,
 )
 from app.services import clouds_yaml_parser, openstack_validator
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 
 router = APIRouter()
 

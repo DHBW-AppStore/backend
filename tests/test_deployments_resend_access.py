@@ -164,7 +164,7 @@ def test_resend_access_team_member_self_dispatches(client, db, mock_user, mock_s
 
     # Swap auth to the student so this is the "member self-resend" path.
     from app.main import app as fastapi_app
-    from app.utils.keycloak_auth import get_current_user_keycloak
+    from app.utils.permissions import get_current_user as get_current_user_keycloak
     fastapi_app.dependency_overrides[get_current_user_keycloak] = lambda: mock_student
 
     with patch(

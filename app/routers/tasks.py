@@ -21,8 +21,13 @@ from app.crud import tasks as crud_tasks
 from app.database import get_db
 from app.models import User
 from app.schemas import TaskResponse
-from app.utils.keycloak_auth import get_current_user_keycloak
-from app.utils.permissions import ensure_deployment_access, ensure_deployment_owner_view
+from app.utils.permissions import (
+    ensure_deployment_access,
+    ensure_deployment_owner_view,
+)
+from app.utils.permissions import (
+    get_current_user as get_current_user_keycloak,
+)
 
 router = APIRouter()
 

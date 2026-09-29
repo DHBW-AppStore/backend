@@ -12,6 +12,31 @@ def get_course(db: Session, course_id: UUID) -> Course | None:
     return db.query(Course).filter(Course.courseId == course_id).first()
 
 
+def get_course_by_lti_context_id(db: Session, lti_context_id: str) -> Course | None:
+    """Get course by its Moodle LTI context id"""
+    return db.query(Course).filter(Course.lti_context_id == lti_context_id).first()
+
+
+def get_or_create_course_by_lti_context(
+    db: Session, lti_context_id: str, name: str
+) -> Course:
+    """Find the course matching this LTI context id, creating it if missing.
+
+    Used by LTI JIT provisioning (``sync_user_from_lti``) — the Moodle
+    context id is stable across relaunches, so it's the natural key for
+    upserting the corresponding local Course.
+    """
+    course = get_course_by_lti_context_id(db, lti_context_id)
+    if course:
+        return course
+
+    course = Course(name=name, lti_context_id=lti_context_id)
+    db.add(course)
+    db.commit()
+    db.refresh(course)
+    return course
+
+
 def get_courses(db: Session, skip: int = 0, limit: int = 100) -> list[Course]:
     """Get all courses"""
     return db.query(Course).offset(skip).limit(limit).all()

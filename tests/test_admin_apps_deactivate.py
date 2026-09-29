@@ -31,7 +31,7 @@ from app.models import (
     AppVersionApprovalStatus,
     Deployment,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 from tests.conftest import create_app_in_db
 
 

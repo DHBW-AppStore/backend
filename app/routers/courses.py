@@ -16,7 +16,9 @@ from app.schemas import (
     UserResponse,
 )
 from app.utils.capabilities import ensure_edit_course
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import (
+    get_current_user as get_current_user_keycloak,
+)
 from app.utils.permissions import (
     require_admin,
     require_staff,

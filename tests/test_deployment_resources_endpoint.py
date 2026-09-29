@@ -269,7 +269,7 @@ def test_list_resources_owner_only(
 
     # Re-patch the auth to the student
     from app.main import app
-    from app.utils.keycloak_auth import get_current_user_keycloak
+    from app.utils.permissions import get_current_user as get_current_user_keycloak
 
     app.dependency_overrides[get_current_user_keycloak] = lambda: mock_student
     try:

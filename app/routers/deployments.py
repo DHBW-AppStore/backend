@@ -51,10 +51,12 @@ from app.utils.capabilities import (
     ensure_view_deployment_owner,
     get_my_course_teacher_ids,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
 from app.utils.permissions import (
     ensure_deployment_access,
     is_deployment_owner_view,
+)
+from app.utils.permissions import (
+    get_current_user as get_current_user_keycloak,
 )
 
 logger = logging.getLogger(__name__)

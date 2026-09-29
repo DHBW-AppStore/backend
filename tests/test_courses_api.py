@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 from app.database import get_db
 from app.main import app as fastapi_app
 from app.models import Course, CourseTeacher, User, UserRole
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 from tests.conftest import TestingSessionLocal
 
 # ----------------------------------------------------------------

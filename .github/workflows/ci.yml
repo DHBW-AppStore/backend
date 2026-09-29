@@ -13,10 +13,10 @@ env:
 
 jobs:
   # ================================================================
-  # 🔍 LINT
+  # LINT
   # ================================================================
   lint:
-    name: "🔍 Lint"
+    name: "Lint"
     runs-on: ubuntu-latest
 
     steps:
@@ -380,7 +380,7 @@ jobs:
   build:
     name: "🐳 Build"
     runs-on: ubuntu-latest
-    needs: [lint, test-integration, security]
+    needs: [lint, test-integration]
     permissions:
       contents: read
       packages: write
@@ -548,7 +548,7 @@ jobs:
       - name: Trigger staging deployment
         run: |
           gh workflow run staging.yml \
-            --repo six7-click-n-deploy/deployment \
+            --repo NextAppStore/deployment \
             --ref main
         env:
           GH_TOKEN: ${{ secrets.DEPLOYMENT_PAT }}

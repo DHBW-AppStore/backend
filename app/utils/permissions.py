@@ -8,8 +8,11 @@ resource-level decisions live in :mod:`app.utils.capabilities`.
 from collections.abc import Callable
 
 from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import jwt as jose_jwt
 from sqlalchemy.orm import Session
 
+from app.database import get_db
 from app.models import (
     Deployment,
     Team,
@@ -18,7 +21,34 @@ from app.models import (
     UserToDeployment,
     UserToTeam,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak as get_current_user
+from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.lti_auth import get_current_user_lti
+
+_security = HTTPBearer()
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(_security),
+    db: Session = Depends(get_db),
+) -> User:
+    """Resolve the current user from either a Keycloak-issued bearer token
+    or a backend-issued LTI session token (see app/utils/lti_auth.py).
+
+    The two token formats are distinguished cheaply, without a wasted
+    signature-verification round trip: an LTI session token always
+    carries a ``typ: lti-session`` claim in its (unverified) payload,
+    which a Keycloak-issued RS256 token never has. The unverified peek
+    only decides *which* verifier to run — the chosen path still fully
+    verifies the signature before trusting anything.
+    """
+    try:
+        unverified = jose_jwt.get_unverified_claims(credentials.credentials)
+    except Exception:
+        unverified = {}
+
+    if unverified.get("typ") == "lti-session":
+        return get_current_user_lti(credentials=credentials, db=db)
+    return get_current_user_keycloak(credentials=credentials, db=db)
 
 # ----------------------------------------------------------------
 # ROLE GROUPINGS

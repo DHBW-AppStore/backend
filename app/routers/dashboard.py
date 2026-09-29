@@ -17,7 +17,7 @@ from app.models import (
     UserToTeam,
 )
 from app.utils.capabilities import get_my_course_teacher_ids
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 
 router = APIRouter()
 

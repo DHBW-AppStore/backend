@@ -40,6 +40,7 @@ killt die Suite die Dev-Daten.
 """
 
 import os
+import time
 import uuid
 import warnings
 
@@ -66,7 +67,8 @@ from app.models import (  # noqa: F401  (importiert für seitliche Effekte / Met
     User,
     UserRole,
 )
-from app.utils.keycloak_auth import get_current_user_keycloak
+from app.utils import lti_auth
+from app.utils.permissions import get_current_user as get_current_user_keycloak
 
 # ----------------------------------------------------------------
 # Engine — einmal pro Test-Prozess.
@@ -296,6 +298,42 @@ def unauth_client():
         yield c
 
     app.dependency_overrides.clear()
+
+
+# ----------------------------------------------------------------
+# LTI NONCE STORE (fake Redis)
+# ----------------------------------------------------------------
+# app.utils.lti_auth talks to Redis for the OIDC state/nonce store (see
+# its module docstring). Autouse + session-independent: any test that
+# exercises /lti/login or create_login_attempt()/consume_login_attempt()
+# directly — not just tests/unit/test_utils_lti_auth.py — would otherwise
+# try to open a real connection to the `redis` hostname, which doesn't
+# resolve outside the docker-compose network (this is what broke CI).
+class _FakeRedis:
+    """Minimal in-memory stand-in for the two redis-py calls lti_auth
+    makes (setex, getdel)."""
+
+    def __init__(self):
+        self._store: dict[str, tuple[str, float]] = {}
+
+    def setex(self, key: str, ttl: int, value: str) -> None:
+        self._store[key] = (value, time.time() + ttl)
+
+    def getdel(self, key: str) -> str | None:
+        entry = self._store.pop(key, None)
+        if entry is None:
+            return None
+        value, expiry = entry
+        return value if expiry >= time.time() else None
+
+
+@pytest.fixture(autouse=True)
+def _fake_lti_redis_client():
+    """Isolate app.utils.lti_auth's module-level Redis client between tests."""
+    fake = _FakeRedis()
+    lti_auth._redis_client = fake
+    yield fake
+    lti_auth._redis_client = None
 
 
 # ----------------------------------------------------------------
