@@ -53,7 +53,22 @@
 
 ---
 
-## 4. Asynchrone Entkopplung (Non-Blocking FastAPI)
+## 4. Sandbox Verification Commands (Level 2 Fast Loop)
+
+Execute all verification inside the sandbox container (run from `backend/` or adjust to repo root):
+
+| Action                            | Command                                                                                                                                                                                                                                                                     |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Fast Suite (Lint + Fast Unit)** | `python3 ../agentic-harness/sandbox.py "bash agentic-harness/verify.sh fast"`                                                                                                                                                                                               |
+| **Full Suite (All Tests)**        | `python3 ../agentic-harness/sandbox.py "bash agentic-harness/verify.sh"`                                                                                                                                                                                                    |
+| **Linting (Ruff Check)**          | `python3 ../agentic-harness/sandbox.py "ruff check backend/"`                                                                                                                                                                                                               |
+| **Formatting Check**              | `python3 ../agentic-harness/sandbox.py "ruff format --check backend/"`                                                                                                                                                                                                      |
+| **Single Test File**              | `python3 ../agentic-harness/sandbox.py "export DATABASE_URL='postgresql+psycopg2://testuser:testpass@localhost:5432/testdb' CREDENTIAL_ENCRYPTION_KEY='MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=' SECRET_KEY='test' && pytest backend/tests/<test_file>.py -q --no-cov"` |
+| **OpenAPI Spec Export**           | `python3 ../agentic-harness/sandbox.py "python3 backend/export_openapi.py"`                                                                                                                                                                                                 |
+
+---
+
+## 5. Asynchrone Entkopplung (Non-Blocking FastAPI)
 
 - **Keine synchronen Cloud-Operationen in HTTP-Endpunkten:**
   - FastAPI-Endpunkte dürfen niemals langwierige oder potenziell blockierende Cloud-Aktionen (wie Terraform `apply`/`destroy`, Packer-Builds oder direkte synchrone OpenStack-Provisionierungen) direkt im Request-Thread ausführen.
