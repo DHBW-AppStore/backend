@@ -146,3 +146,39 @@ Die Vorlagen legen mit `ip` und `url` weiterhin den bevorzugten Zugang fest;
 das Backend wählt nicht automatisch eine IP-Familie aus. Fertige URLs werden
 unverändert übernommen und müssen bei IPv6-Literalen bereits korrekt
 geklammert sein, z. B. `http://[2001:db8::10]:8080`.
+
+## HTTP-Listener konfigurieren
+
+Die Docker-Images starten über `python -m app.server` (Dev zusätzlich
+`--reload`). `HOST` ist standardmäßig `0.0.0.0` für bisherigen IPv4-Betrieb.
+Mit `HOST=::` öffnet der Startcode ausdrücklich einen Dual-Stack-Socket;
+IPv4 und IPv6 funktionieren damit auch bei `WORKERS=1`, mehreren Workern und
+Dev-Reload gleich. Wenn der Host keine Dual-Stack-Sockets unterstützt, schlägt
+der Start sichtbar fehl. Eine konkrete IPv6-Adresse bindet nur IPv6.
+
+`PORT` (Standard 8000), `WORKERS` (Standard 4; mit Reload immer 1), `LOG_LEVEL`
+und `FORWARDED_ALLOW_IPS` konfigurieren den Start. Das Produktionsimage behält
+seine bisherige Proxy-Vertrauenskonfiguration `*`; außerhalb des Images gilt
+standardmäßig `127.0.0.1`. Ein Compose-`command` muss den neuen Einstieg
+verwenden, sonst überschreibt es diese Konfiguration.
+
+`tests/unit/test_server.py` startet echte Backend-Prozesse und ruft `/health`
+über explizite IPv4-/IPv6-Verbindungen auf. Der Test benötigt IPv6-Loopback,
+aber keine Cloud-Verbindung und keine Datenbank-Schreibzugriffe.
+
+Image-Startbefehle separat prüfen (temporäre Container, synthetische Settings,
+keine Cloud-/Datenbank-Schreibzugriffe):
+
+```sh
+docker build -t backend-listener-test .
+python3 scripts/check_listener_image.py backend-listener-test
+docker build -t backend-listener-dev-test -f Dockerfile.dev .
+python3 scripts/check_listener_image.py backend-listener-dev-test
+```
+
+Das Image-Prüfskript wählt mit `postgresql+psycopg2://` den tatsächlich
+installierten Treiber explizit. Bei frischer Auflösung kann SQLAlchemy 2.1
+installiert werden; dort erwartet die unspezifische URL `postgresql://` den
+hier nicht installierten Treiber `psycopg`. Für solche Umgebungen muss
+`DATABASE_URL` ausdrücklich `postgresql+psycopg2://...` verwenden. Dieser
+Unterschied betrifft die Datenbankkonfiguration, nicht die IP-Familie.

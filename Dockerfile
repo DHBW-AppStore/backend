@@ -107,7 +107,8 @@ ENV DEBUG=False \
     PORT=8000 \
     HOST=0.0.0.0 \
     WORKERS=4 \
-    LOG_LEVEL=info
+    LOG_LEVEL=info \
+    FORWARDED_ALLOW_IPS=*
 
-# Run uvicorn directly
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# Bind explicitly so HOST=:: accepts IPv4 and IPv6 in every worker mode.
+CMD ["python", "-m", "app.server"]
