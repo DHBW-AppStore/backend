@@ -26,6 +26,64 @@
         }
       }
     },
+    "/lti/login": {
+      "get": {
+        "tags": [
+          "LTI"
+        ],
+        "summary": "Lti Login",
+        "description": "Receives the OIDC login-initiation request from Moodle and redirects\nback to the platform's own auth endpoint with a freshly generated\nstate/nonce pair (verified again on ``/lti/launch``).",
+        "operationId": "lti_login_lti_login_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "LTI"
+        ],
+        "summary": "Lti Login",
+        "description": "Receives the OIDC login-initiation request from Moodle and redirects\nback to the platform's own auth endpoint with a freshly generated\nstate/nonce pair (verified again on ``/lti/launch``).",
+        "operationId": "lti_login_lti_login_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/lti/launch": {
+      "post": {
+        "tags": [
+          "LTI"
+        ],
+        "summary": "Lti Launch",
+        "description": "Receives the signed id_token launch from Moodle, verifies it, JIT\nprovisions the local user, and redirects into the frontend with a\nshort-lived backend-issued session token.",
+        "operationId": "lti_launch_lti_launch_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/users/me": {
       "get": {
         "tags": [
@@ -4197,6 +4255,17 @@
             "type": "string",
             "format": "uuid",
             "title": "Courseid"
+          },
+          "lti_context_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lti Context Id"
           }
         },
         "type": "object",
@@ -4233,6 +4302,17 @@
             "type": "string",
             "format": "uuid",
             "title": "Courseid"
+          },
+          "lti_context_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lti Context Id"
           },
           "users": {
             "items": {
@@ -5960,6 +6040,17 @@
             ],
             "title": "Keycloak Id"
           },
+          "lti_iss": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lti Iss"
+          },
           "firstName": {
             "anyOf": [
               {
@@ -6109,6 +6200,17 @@
               }
             ],
             "title": "Keycloak Id"
+          },
+          "lti_iss": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lti Iss"
           },
           "firstName": {
             "anyOf": [
