@@ -1,18 +1,18 @@
 # Backend
 
-[![Coverage](https://img.shields.io/endpoint?url=https://six7-click-n-deploy.github.io/backend/badge.json)](https://six7-click-n-deploy.github.io/backend/)
+[![Coverage](https://img.shields.io/endpoint?url=https://dhbw-appstore.github.io/backend/badge.json)](https://dhbw-appstore.github.io/backend/)
 
 FastAPI-Backend des App Stores. Nimmt REST-Anfragen vom Frontend entgegen, validiert Keycloak-Tokens, persistiert in PostgreSQL und dispatcht Deployment-Tasks an den Celery-Worker via RabbitMQ.
 
 ## Setup
 
-Dieses Repository wird nicht eigenständig gestartet. Der gesamte Stack — inklusive Backend — wird über das deployment-Repository hochgefahren. Vollständige Anleitung: [deployment/README.md](https://github.com/six7-click-n-deploy/deployment#readme).
+Dieses Repository wird nicht eigenständig gestartet. Der gesamte Stack — inklusive Backend — wird über das deployment-Repository hochgefahren. Vollständige Anleitung: [deployment/README.md](https://github.com/DHBW-AppStore/deployment#readme).
 
 Voraussetzung für alle folgenden Befehle: `make dev-up` aus dem `deployment/`-Verzeichnis wurde ausgeführt und der Stack läuft.
 
 ## Entwicklung
 
-Alle `make`-Befehle werden aus dem `deployment/`-Verzeichnis des [deployment-Repos](https://github.com/six7-click-n-deploy/deployment) ausgeführt — dort liegt das Makefile.
+Alle `make`-Befehle werden aus dem `deployment/`-Verzeichnis des [deployment-Repos](https://github.com/DHBW-AppStore/deployment) ausgeführt — dort liegt das Makefile.
 
 ```bash
 # in app-store/deployment
@@ -112,5 +112,5 @@ app/
 
 ## Mehr
 
-- Architektur und projektübergreifende Doku: [.github-Repo](https://github.com/six7-click-n-deploy/.github)
-- Worker-Service: [worker-Repo](https://github.com/six7-click-n-deploy/worker)
+- Architektur und projektübergreifende Doku: [.github-Repo](https://github.com/DHBW-AppStore/.github)
+- Worker-Service: [worker-Repo](https://github.com/DHBW-AppStore/worker)
