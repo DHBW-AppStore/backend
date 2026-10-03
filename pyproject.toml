@@ -15,8 +15,8 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-homepage = "https://github.com/six7-click-n-deploy/backend"
-repository = "https://github.com/six7-click-n-deploy/backend"
+homepage = "https://github.com/DHBW-AppStore/backend"
+repository = "https://github.com/DHBW-AppStore/backend"
 
 [tool.poetry.dependencies]
 python = ">=3.11,<4"
