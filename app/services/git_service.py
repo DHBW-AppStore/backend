@@ -57,7 +57,13 @@ class GitService:
     def _resolve_token(self, parsed: dict[str, str]) -> tuple[str, str]:
         """Return ``(token, clone_user)``: the App token if installed, else GIT_ACCESS_TOKEN."""
         if self._uses_github_app(parsed):
-            token = github_app.installation_token(parsed['owner'], parsed['repo'])
+            try:
+                token = github_app.installation_token(parsed['owner'], parsed['repo'])
+            except Exception as e:
+                # The API is not on the critical path: a public repo is readable
+                # without it, so a slow GitHub must not break the whole request.
+                logger.warning(f"GitHub App unreachable, continuing without its token: {e}")
+                token = None
             if token:
                 # Installation tokens only work with this fixed username.
                 return token, 'x-access-token'

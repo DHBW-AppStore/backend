@@ -228,6 +228,18 @@ def test_clone_url_falls_back_to_token_when_app_not_installed(mock_app, tmp_path
 
 
 @patch("app.services.git_service.github_app")
+def test_api_failure_falls_back_instead_of_raising(mock_app, tmp_path, monkeypatch):
+    """A timeout at the GitHub API must not stop the clone or the version lookup."""
+    mock_app.is_configured.return_value = True
+    mock_app.installation_token.side_effect = TimeoutError("read timed out")
+    svc = _service(tmp_path, monkeypatch)
+
+    url = svc._get_authenticated_url("https://github.com/acme/widgets.git")
+
+    assert url == "https://test-token-xyz@github.com/acme/widgets.git"
+
+
+@patch("app.services.git_service.github_app")
 def test_other_hosts_never_ask_the_app(mock_app, tmp_path, monkeypatch):
     mock_app.is_configured.return_value = True
     svc = _service(tmp_path, monkeypatch)
